@@ -1,0 +1,20 @@
+services:
+  webnut:
+    build: .
+    container_name: webnut
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+    # Uncomment privileged mode if hot-plugging USB UPS devices without container restart
+    # privileged: true
+    environment:
+      - TZ=${TZ:-UTC}
+      - WEB_PORT=${WEB_PORT:-8765}
+      - NUT_PORT=${NUT_PORT:-3493}
+    volumes:
+      - ./data/nut:/etc/nut
+      - ./data/app:/app/data

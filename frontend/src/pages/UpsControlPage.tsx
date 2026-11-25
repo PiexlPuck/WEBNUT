@@ -584,11 +584,18 @@ export function UpsControlPage({ telemetry, onRefresh }: UpsControlPageProps) {
             {upsNames.length === 0 ? (
               <option value="">No UPS Connected</option>
             ) : (
-              upsNames.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))
+              upsNames.map((name) => {
+                const tel = telemetry.ups_list.find((u) => u.name === name);
+                const nodeLabel = tel?.source_node_name
+                  ? ` [${tel.source_node_name}${tel.node_online === false ? " - Offline" : ""}]`
+                  : "";
+                return (
+                  <option key={name} value={name}>
+                    {name}
+                    {nodeLabel}
+                  </option>
+                );
+              })
             )}
           </select>
           <button

@@ -206,6 +206,11 @@ export interface UpsTelemetry {
   ups_model: string | null;
   raw_vars: Record<string, string>;
   connected_clients: string[];
+  source_node_id?: number | null;
+  source_node_name?: string | null;
+  source_node_slug?: string | null;
+  remote_ups_name?: string | null;
+  node_online?: boolean;
 }
 
 export interface TelemetrySnapshot {
@@ -792,4 +797,74 @@ export interface SelfTestReportsSummary {
 export interface SelfTestReportsResponse {
   summary: SelfTestReportsSummary;
   reports: SelfTestReportRecord[];
+}
+
+export interface SystemInfo {
+  role: "main" | "repeater";
+  version: string;
+  web_port: number;
+  nut_port: number;
+  node_name: string;
+  paired: boolean;
+}
+
+export interface RepeaterNodeView {
+  id: number;
+  name: string;
+  slug: string;
+  ui_url: string;
+  remote_ip: string;
+  app_version: string;
+  enabled: boolean;
+  online: boolean;
+  latency_ms: number | null;
+  last_seen_at: string | null;
+  ups_count: number;
+  ups_names: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RepeaterJoinTokenView {
+  id: number;
+  label: string;
+  token_prefix: string;
+  expires_at: string;
+  max_uses: number;
+  use_count: number;
+  revoked: boolean;
+  expired: boolean;
+  created_at: string;
+}
+
+export interface RepeaterJoinTokenCreateResponse {
+  token: string;
+  token_record: RepeaterJoinTokenView;
+  main_url: string;
+  docker_compose_yaml: string;
+}
+
+export interface RepeaterLocalUpsPreview {
+  local_name: string;
+  main_name: string;
+  status: string;
+  battery_charge: number | null;
+  ups_load: number | null;
+  description: string;
+}
+
+export interface RepeaterLinkStatus {
+  paired: boolean;
+  connected: boolean;
+  main_url: string;
+  node_id: number | null;
+  node_name: string;
+  node_slug: string;
+  public_url: string;
+  push_interval_sec: number;
+  last_push_at: string | null;
+  last_error: string | null;
+  latency_ms: number | null;
+  ups_preview: RepeaterLocalUpsPreview[];
+  updated_at: string | null;
 }

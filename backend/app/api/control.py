@@ -140,6 +140,29 @@ async def get_ups_capabilities(ups_name: str, request: Request) -> UpsCapabiliti
     nut_client = request.app.state.nut_client
     db = request.app.state.db
     nut_manager = request.app.state.nut_manager
+    repeater_hub = getattr(request.app.state, "repeater_hub", None)
+
+    remote = repeater_hub.resolve_remote_ups(safe_ups) if repeater_hub is not None else None
+    if remote is not None:
+        node_id, node_name, raw_ups = remote
+        try:
+            res = await repeater_hub.call_rpc(
+                node_id,
+                "get_capabilities",
+                {"ups_name": raw_ups},
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to query capabilities from Repeater '{node_name}': {exc}",
+            ) from exc
+        return UpsCapabilitiesResponse(
+            ups_name=safe_ups,
+            commands=[UpsCommandInfo(**c) for c in (res.get("commands") or [])],
+            writable_vars=[UpsWritableVarInfo(**v) for v in (res.get("writable_vars") or [])],
+            credentials_configured=bool(res.get("credentials_configured", False)),
+            credential_source=f"repeater:{node_name} ({res.get('credential_source', 'none')})",
+        )
 
     try:
         raw_cmds = await nut_client.list_commands(safe_ups)
@@ -204,6 +227,42 @@ async def run_ups_command(
     nut_manager = request.app.state.nut_manager
     nut_client = request.app.state.nut_client
     event_log = request.app.state.event_log
+    repeater_hub = getattr(request.app.state, "repeater_hub", None)
+
+    remote = repeater_hub.resolve_remote_ups(safe_ups) if repeater_hub is not None else None
+    if remote is not None:
+        node_id, node_name, raw_ups = remote
+        try:
+            res = await repeater_hub.call_rpc(
+                node_id,
+                "set_var",
+                {"ups_name": raw_ups, "var_name": safe_var, "value": safe_val},
+            )
+            ok = bool(res.get("ok", False))
+            msg = str(res.get("message") or "")
+        except Exception as exc:
+            ok = False
+            msg = f"Repeater '{node_name}' error: {exc}"
+        await event_log.record(
+            "ups_control",
+            "success" if ok else "error",
+            "ups_set_var",
+            f"SET VAR '{safe_var}' on '{safe_ups}' ({node_name}) = '{safe_val}': {msg}",
+            {
+                "ups_name": safe_ups,
+                "var_name": safe_var,
+                "value": safe_val,
+                "ok": ok,
+                "node": node_name,
+            },
+        )
+        return SetUpsVarResponse(
+            ok=ok,
+            ups_name=safe_ups,
+            var_name=safe_var,
+            value=safe_val,
+            message=msg,
+        )
 
     username, password = await resolve_control_credentials(db, nut_manager)
     if not username or not password:
@@ -250,6 +309,42 @@ async def set_ups_var(
     nut_manager = request.app.state.nut_manager
     nut_client = request.app.state.nut_client
     event_log = request.app.state.event_log
+    repeater_hub = getattr(request.app.state, "repeater_hub", None)
+
+    remote = repeater_hub.resolve_remote_ups(safe_ups) if repeater_hub is not None else None
+    if remote is not None:
+        node_id, node_name, raw_ups = remote
+        try:
+            res = await repeater_hub.call_rpc(
+                node_id,
+                "set_var",
+                {"ups_name": raw_ups, "var_name": safe_var, "value": safe_val},
+            )
+            ok = bool(res.get("ok", False))
+            msg = str(res.get("message") or "")
+        except Exception as exc:
+            ok = False
+            msg = f"Repeater '{node_name}' error: {exc}"
+        await event_log.record(
+            "ups_control",
+            "success" if ok else "error",
+            "ups_set_var",
+            f"SET VAR '{safe_var}' on '{safe_ups}' ({node_name}) = '{safe_val}': {msg}",
+            {
+                "ups_name": safe_ups,
+                "var_name": safe_var,
+                "value": safe_val,
+                "ok": ok,
+                "node": node_name,
+            },
+        )
+        return SetUpsVarResponse(
+            ok=ok,
+            ups_name=safe_ups,
+            var_name=safe_var,
+            value=safe_val,
+            message=msg,
+        )
 
     username, password = await resolve_control_credentials(db, nut_manager)
     if not username or not password:

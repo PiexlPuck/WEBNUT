@@ -74,7 +74,8 @@ export function DashboardPage({
           >
             {telemetry.ups_list.map((u, idx) => (
               <option key={u.name} value={idx}>
-                {u.name} ({u.status})
+                {u.name}
+                {u.source_node_name ? ` [${u.source_node_name}]` : ""} ({u.status})
               </option>
             ))}
           </select>
@@ -109,9 +110,21 @@ export function DashboardPage({
         <div className="space-y-4">
           <div className="rounded-2xl border border-slate-800 bg-surface-900 p-5 flex flex-wrap items-center justify-between gap-4">
             <div>
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
                 <h3 className="text-lg font-semibold text-white font-mono">{ups.name}</h3>
                 <UpsStatusBadge status={ups.status} />
+                {ups.source_node_name && (
+                  <span
+                    className={`inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full border ${
+                      ups.node_online === false
+                        ? "bg-rose-500/15 text-rose-300 border-rose-500/40"
+                        : "bg-sky-500/15 text-sky-300 border-sky-500/40"
+                    }`}
+                  >
+                    Node: {ups.source_node_name}
+                    {ups.node_online === false ? " (Offline)" : ""}
+                  </span>
+                )}
               </div>
               <p className="text-xs text-slate-400 mt-1">
                 {[ups.ups_mfr, ups.ups_model, ups.description].filter(Boolean).join(" • ") ||

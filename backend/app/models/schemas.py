@@ -261,6 +261,11 @@ class UpsTelemetry(BaseModel):
     ups_model: str | None = None
     raw_vars: dict[str, str] = Field(default_factory=dict)
     connected_clients: list[str] = Field(default_factory=list)
+    source_node_id: int | None = None
+    source_node_name: str | None = None
+    source_node_slug: str | None = None
+    remote_ups_name: str | None = None
+    node_online: bool = True
 
 
 class TelemetrySnapshot(BaseModel):
@@ -948,3 +953,109 @@ class PrometheusConfigResponse(BaseModel):
     requires_api_key: bool
     sample_metrics: str
     notes: list[str] = Field(default_factory=list)
+
+
+# --- System Info & Distributed Repeater Node Models ---
+
+class SystemInfoResponse(BaseModel):
+    role: Literal["main", "repeater"]
+    version: str
+    web_port: int
+    nut_port: int
+    node_name: str = ""
+    paired: bool = False
+
+
+class RepeaterJoinTokenCreateRequest(BaseModel):
+    label: str = Field(default="", max_length=80)
+    expires_hours: int = Field(default=24, ge=1, le=720)
+    max_uses: int = Field(default=1, ge=1, le=100)
+
+
+class RepeaterJoinTokenView(BaseModel):
+    id: int
+    label: str = ""
+    token_prefix: str = ""
+    expires_at: str
+    max_uses: int
+    use_count: int
+    revoked: bool = False
+    expired: bool = False
+    created_at: str
+
+
+class RepeaterJoinTokenCreateResponse(BaseModel):
+    token: str
+    token_record: RepeaterJoinTokenView
+    main_url: str
+    docker_compose_yaml: str
+
+
+class RepeaterJoinRequest(BaseModel):
+    join_token: str = Field(min_length=8, max_length=256)
+    node_name: str = Field(min_length=1, max_length=80)
+    ui_url: str = Field(default="", max_length=255)
+    app_version: str = Field(default="", max_length=32)
+
+
+class RepeaterJoinResponse(BaseModel):
+    node_id: int
+    node_name: str
+    node_slug: str
+    auth_token: str
+    ws_path: str = "/ws/repeater"
+
+
+class RepeaterNodeView(BaseModel):
+    id: int
+    name: str
+    slug: str
+    ui_url: str = ""
+    remote_ip: str = ""
+    app_version: str = ""
+    enabled: bool = True
+    online: bool = False
+    latency_ms: float | None = None
+    last_seen_at: str | None = None
+    ups_count: int = 0
+    ups_names: list[str] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+
+
+class RepeaterNodeUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    ui_url: str | None = Field(default=None, max_length=255)
+    enabled: bool | None = None
+
+
+class RepeaterLinkPairRequest(BaseModel):
+    main_url: str = Field(min_length=1, max_length=255)
+    join_token: str = Field(min_length=8, max_length=256)
+    node_name: str = Field(min_length=1, max_length=80)
+    public_url: str = Field(default="", max_length=255)
+
+
+class RepeaterLocalUpsPreview(BaseModel):
+    local_name: str
+    main_name: str
+    status: str
+    battery_charge: float | None = None
+    ups_load: float | None = None
+    description: str = ""
+
+
+class RepeaterLinkStatusResponse(BaseModel):
+    paired: bool = False
+    connected: bool = False
+    main_url: str = ""
+    node_id: int | None = None
+    node_name: str = ""
+    node_slug: str = ""
+    public_url: str = ""
+    push_interval_sec: int = 3
+    last_push_at: str | None = None
+    last_error: str | None = None
+    latency_ms: float | None = None
+    ups_preview: list[RepeaterLocalUpsPreview] = Field(default_factory=list)
+    updated_at: str | None = None

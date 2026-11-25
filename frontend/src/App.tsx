@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Layout, type NavTab } from "./components/Layout";
 import { useLiveTelemetry } from "./hooks/useLiveTelemetry";
@@ -10,8 +10,12 @@ import { NotificationsPage } from "./pages/NotificationsPage";
 import { NutClientsPage } from "./pages/NutClientsPage";
 import { NutConfigPage } from "./pages/NutConfigPage";
 import { RecordedConfigsPage } from "./pages/RecordedConfigsPage";
+import { RepeaterLinkPage } from "./pages/RepeaterLinkPage";
+import { RepeatersPage } from "./pages/RepeatersPage";
 import { UpsControlPage } from "./pages/UpsControlPage";
 import type { RecordedClientConfigSummary } from "./types";
+
+const REPEATER_ALLOWED_TABS: NavTab[] = ["repeater_link", "nut", "events"];
 
 export function App() {
   const [activeTab, setActiveTab] = useState<NavTab>("dashboard");
@@ -19,6 +23,19 @@ export function App() {
   const [selectedRecordedConfig, setSelectedRecordedConfig] =
     useState<RecordedClientConfigSummary | null>(null);
   const live = useLiveTelemetry();
+
+  const role = live.systemInfo?.role ?? "main";
+
+  useEffect(() => {
+    if (role === "repeater" && !REPEATER_ALLOWED_TABS.includes(activeTab)) {
+      setActiveTab("repeater_link");
+    }
+  }, [role, activeTab]);
+
+  const effectiveTab: NavTab =
+    role === "repeater" && !REPEATER_ALLOWED_TABS.includes(activeTab)
+      ? "repeater_link"
+      : activeTab;
 
   const openNutClientSetup = (hostId: number) => {
     setClientSetupHostId(hostId);
@@ -32,18 +49,28 @@ export function App() {
 
   return (
     <Layout
-      activeTab={activeTab}
+      role={role}
+      activeTab={effectiveTab}
       onSelectTab={setActiveTab}
       wsConnected={live.wsConnected}
       telemetry={live.telemetry}
       orchestrator={live.orchestrator}
       services={live.services}
+      repeaterLink={live.repeaterLink}
       versionStatus={live.versionStatus}
       checkingUpdates={live.checkingUpdates}
       onCheckUpdates={live.checkUpdatesNow}
     >
-      <ErrorBoundary key={activeTab}>
-        {activeTab === "dashboard" && (
+      <ErrorBoundary key={effectiveTab}>
+        {effectiveTab === "repeater_link" && (
+          <RepeaterLinkPage
+            linkStatus={live.repeaterLink}
+            telemetry={live.telemetry}
+            onRefresh={live.refreshAll}
+            onNavigateUpsSetup={() => setActiveTab("nut")}
+          />
+        )}
+        {effectiveTab === "dashboard" && (
           <DashboardPage
             telemetry={live.telemetry}
             hosts={live.hosts}
@@ -53,7 +80,14 @@ export function App() {
             onNavigateHosts={() => setActiveTab("hosts")}
           />
         )}
-        {activeTab === "hosts" && (
+        {effectiveTab === "repeaters" && (
+          <RepeatersPage
+            nodes={live.repeaterNodes}
+            telemetry={live.telemetry}
+            onRefresh={live.refreshAll}
+          />
+        )}
+        {effectiveTab === "hosts" && (
           <HostsPage
             hosts={live.hosts}
             orchestrator={live.orchestrator}
@@ -62,7 +96,7 @@ export function App() {
             onOpenNutClientSetup={openNutClientSetup}
           />
         )}
-        {activeTab === "clients" && (
+        {effectiveTab === "clients" && (
           <NutClientsPage
             hosts={live.hosts}
             telemetry={live.telemetry}
@@ -73,34 +107,35 @@ export function App() {
             onOpenSavedConfigs={() => setActiveTab("recorded_configs")}
           />
         )}
-        {activeTab === "recorded_configs" && (
+        {effectiveTab === "recorded_configs" && (
           <RecordedConfigsPage
             onLoadInClientSetup={handleLoadRecordedConfig}
             onNavigateClientSetup={() => setActiveTab("clients")}
           />
         )}
-        {activeTab === "integrations" && (
+        {effectiveTab === "integrations" && (
           <IntegrationsPage
             telemetry={live.telemetry}
             hosts={live.hosts}
             orchestrator={live.orchestrator}
           />
         )}
-        {activeTab === "nut" && (
+        {effectiveTab === "nut" && (
           <NutConfigPage
             services={live.services}
             telemetry={live.telemetry}
             onRefresh={live.refreshAll}
+            repeaterMode={role === "repeater"}
           />
         )}
-        {activeTab === "control" && (
+        {effectiveTab === "control" && (
           <UpsControlPage
             telemetry={live.telemetry}
             onRefresh={live.refreshAll}
           />
         )}
-        {activeTab === "notifications" && <NotificationsPage />}
-        {activeTab === "events" && <EventsPage />}
+        {effectiveTab === "notifications" && <NotificationsPage />}
+        {effectiveTab === "events" && <EventsPage />}
       </ErrorBoundary>
     </Layout>
   );

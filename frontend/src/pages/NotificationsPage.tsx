@@ -48,6 +48,14 @@ const EVENT_LABELS: Record<string, { label: string; desc: string }> = {
     label: "UPS Self-Test Failed",
     desc: "UPS battery self-test failed, aborted, or could not run",
   },
+  repeater_node_offline: {
+    label: "Repeater Node Offline",
+    desc: "Remote WEBNUT Repeater container lost tunnel connection to Main WebNUT",
+  },
+  repeater_node_online: {
+    label: "Repeater Node Online",
+    desc: "Remote WEBNUT Repeater container connected and streaming telemetry",
+  },
 };
 
 const PRIORITIES = [

@@ -229,6 +229,7 @@ class SelfTestScheduler:
         poll_interval_sec: float = 30.0,
         monitor_step_sec: float = 3.0,
         monitor_max_wait_sec: float = 900.0,
+        repeater_hub: Any = None,
     ) -> None:
         self.db = db
         self.nut_client = nut_client
@@ -240,6 +241,7 @@ class SelfTestScheduler:
         self.poll_interval_sec = poll_interval_sec
         self.monitor_step_sec = monitor_step_sec
         self.monitor_max_wait_sec = monitor_max_wait_sec
+        self.repeater_hub = repeater_hub
 
         self._task: asyncio.Task[None] | None = None
         self._monitor_tasks: set[asyncio.Task[None]] = set()
@@ -494,6 +496,35 @@ class SelfTestScheduler:
                     if ups.get("name") == ups_name:
                         return ups
 
+        remote = (
+            self.repeater_hub.resolve_remote_ups(ups_name)
+            if self.repeater_hub is not None
+            else None
+        )
+        if remote is not None:
+            node_id, _, raw_ups = remote
+            if prefer_live:
+                try:
+                    res = await self.repeater_hub.call_rpc(node_id, "fetch_telemetry", {})
+                    snap = res.get("snapshot") if isinstance(res, dict) else None
+                    if isinstance(snap, dict):
+                        for u in snap.get("ups_list") or []:
+                            if u.get("name") == raw_ups:
+                                copy = dict(u)
+                                copy["name"] = ups_name
+                                copy["remote_ups_name"] = raw_ups
+                                copy["node_online"] = True
+                                return copy
+                except Exception:
+                    pass
+            if self.orchestrator is not None:
+                latest = getattr(self.orchestrator, "latest_telemetry", None)
+                if isinstance(latest, dict) and latest.get("connected"):
+                    for ups in latest.get("ups_list", []) or []:
+                        if ups.get("name") == ups_name:
+                            return ups
+            return None
+
         try:
             snapshot = await self.nut_client.fetch_telemetry()
             if snapshot.connected:
@@ -669,43 +700,62 @@ class SelfTestScheduler:
                 )
                 return report
 
-        # Resolve NUT control credentials
-        username, password = await resolve_control_credentials(self.db, self.nut_manager)
-        if not username or not password:
-            msg = (
-                "No NUT control credentials configured "
-                "(add a user with instcmds=ALL in upsd.users or configure External NUT credentials)"
-            )
-            report = await self._insert_report(
-                schedule_id=schedule_id,
-                ups_name=ups_name,
-                test_command=test_command,
-                trigger_type=trigger_type,
-                status="failed",
-                started_at=started_at,
-                completed_at=started_at,
-                duration_sec=0,
-                battery_before=battery_before,
-                runtime_before=runtime_before,
-                load_pct=load_pct,
-                message=msg,
-            )
-            await self.event_log.record(
-                "selftest", "error", "selftest_failed", msg,
-                {"ups_name": ups_name, "test_command": test_command, "report_id": report.id},
-            )
-            if notify_on_fail:
-                await self.dispatcher.dispatch_event(
-                    "ups_selftest_failed",
-                    f"UPS Self-Test Failed ({ups_name})",
-                    msg,
+        remote = (
+            self.repeater_hub.resolve_remote_ups(ups_name)
+            if self.repeater_hub is not None
+            else None
+        )
+        if remote is not None:
+            node_id, node_name, raw_ups = remote
+            try:
+                res = await self.repeater_hub.call_rpc(
+                    node_id,
+                    "run_command",
+                    {"ups_name": raw_ups, "command": test_command},
+                )
+                ok = bool(res.get("ok", False))
+                resp_msg = str(res.get("message") or "")
+            except Exception as exc:
+                ok = False
+                resp_msg = f"Repeater '{node_name}' error: {exc}"
+        else:
+            # Resolve NUT control credentials
+            username, password = await resolve_control_credentials(self.db, self.nut_manager)
+            if not username or not password:
+                msg = (
+                    "No NUT control credentials configured "
+                    "(add a user with instcmds=ALL in upsd.users or configure External NUT credentials)"
+                )
+                report = await self._insert_report(
+                    schedule_id=schedule_id,
+                    ups_name=ups_name,
+                    test_command=test_command,
+                    trigger_type=trigger_type,
+                    status="failed",
+                    started_at=started_at,
+                    completed_at=started_at,
+                    duration_sec=0,
+                    battery_before=battery_before,
+                    runtime_before=runtime_before,
+                    load_pct=load_pct,
+                    message=msg,
+                )
+                await self.event_log.record(
+                    "selftest", "error", "selftest_failed", msg,
                     {"ups_name": ups_name, "test_command": test_command, "report_id": report.id},
                 )
-            return report
+                if notify_on_fail:
+                    await self.dispatcher.dispatch_event(
+                        "ups_selftest_failed",
+                        f"UPS Self-Test Failed ({ups_name})",
+                        msg,
+                        {"ups_name": ups_name, "test_command": test_command, "report_id": report.id},
+                    )
+                return report
 
-        ok, resp_msg = await self.nut_client.run_instant_command(
-            ups_name, test_command, username, password
-        )
+            ok, resp_msg = await self.nut_client.run_instant_command(
+                ups_name, test_command, username, password
+            )
         if not ok:
             msg = f"INSTCMD '{test_command}' failed on '{ups_name}': {resp_msg}"
             report = await self._insert_report(

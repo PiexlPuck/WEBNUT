@@ -35,6 +35,10 @@ import type {
   PushoverConfigView,
   RecordedClientConfigDetail,
   RecordedClientConfigSummary,
+  RepeaterJoinTokenCreateResponse,
+  RepeaterJoinTokenView,
+  RepeaterLinkStatus,
+  RepeaterNodeView,
   RepeaterStatusResponse,
   RunUpsCommandResponse,
   ScannedSnmpDevice,
@@ -47,6 +51,7 @@ import type {
   SnmpUpsSetupPayload,
   SshDeployRequest,
   SshDeployResponse,
+  SystemInfo,
   TelemetrySnapshot,
   UpsCapabilitiesResponse,
 } from "../types";
@@ -270,9 +275,58 @@ export const api = {
   clearEvents: () => request<{ cleared: number }>("/api/events", { method: "DELETE" }),
 
   // System / Version
+  getSystemInfo: () => request<SystemInfo>("/api/system/info"),
   getVersionStatus: () => request<AppVersionStatus>("/api/system/version"),
   checkForUpdates: () =>
     request<AppVersionStatus>("/api/system/version/check", { method: "POST" }),
+
+  // Distributed Repeaters (Main) & Main Link (Repeater)
+  getRepeaterNodes: () => request<RepeaterNodeView[]>("/api/repeaters/nodes"),
+  updateRepeaterNode: (
+    id: number,
+    payload: { name?: string; ui_url?: string; enabled?: boolean }
+  ) =>
+    request<RepeaterNodeView>(`/api/repeaters/nodes/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteRepeaterNode: (id: number) =>
+    request<{ deleted: boolean; id: number }>(`/api/repeaters/nodes/${id}`, {
+      method: "DELETE",
+    }),
+  getRepeaterTokens: () => request<RepeaterJoinTokenView[]>("/api/repeaters/tokens"),
+  createRepeaterToken: (payload: {
+    label: string;
+    expires_hours: number;
+    max_uses: number;
+  }) =>
+    request<RepeaterJoinTokenCreateResponse>("/api/repeaters/tokens", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  revokeRepeaterToken: (id: number) =>
+    request<{ revoked: boolean; id: number }>(`/api/repeaters/tokens/${id}`, {
+      method: "DELETE",
+    }),
+  getRepeaterLink: () => request<RepeaterLinkStatus>("/api/repeaters/link"),
+  pairRepeaterLink: (payload: {
+    main_url: string;
+    join_token: string;
+    node_name: string;
+    public_url?: string;
+  }) =>
+    request<RepeaterLinkStatus>("/api/repeaters/link/pair", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  unpairRepeaterLink: () =>
+    request<RepeaterLinkStatus>("/api/repeaters/link/unpair", {
+      method: "POST",
+    }),
+  reconnectRepeaterLink: () =>
+    request<RepeaterLinkStatus>("/api/repeaters/link/reconnect", {
+      method: "POST",
+    }),
 
   // Integrations (Homepage, etc.)
   getIntegrationSettings: () =>

@@ -10,6 +10,7 @@ import {
   LayoutGrid,
   Link2,
   Power,
+  Radio,
   RefreshCw,
   Server,
   Settings2,
@@ -23,11 +24,14 @@ import type {
   AppVersionStatus,
   NutServiceStatus,
   OrchestratorState,
+  RepeaterLinkStatus,
   TelemetrySnapshot,
 } from "../types";
 
 export type NavTab =
   | "dashboard"
+  | "repeaters"
+  | "repeater_link"
   | "hosts"
   | "clients"
   | "recorded_configs"
@@ -38,21 +42,24 @@ export type NavTab =
   | "events";
 
 interface LayoutProps {
+  role?: "main" | "repeater";
   activeTab: NavTab;
   onSelectTab: (tab: NavTab) => void;
   wsConnected: boolean;
   telemetry: TelemetrySnapshot;
   orchestrator: OrchestratorState;
   services: NutServiceStatus[];
+  repeaterLink?: RepeaterLinkStatus | null;
   versionStatus: AppVersionStatus | null;
   checkingUpdates: boolean;
   onCheckUpdates: () => Promise<void>;
   children: ReactNode;
 }
 
-const NAV_ITEMS: { id: NavTab; label: string; icon: typeof Activity }[] = [
+const MAIN_NAV_ITEMS: { id: NavTab; label: string; icon: typeof Activity }[] = [
   { id: "dashboard", label: "Overview", icon: Activity },
   { id: "nut", label: "UPS Setup", icon: Settings2 },
+  { id: "repeaters", label: "Repeaters", icon: Radio },
   { id: "control", label: "UPS Control", icon: Sliders },
   { id: "hosts", label: "Managed Hosts", icon: Server },
   { id: "clients", label: "Client Setup", icon: Link2 },
@@ -62,18 +69,27 @@ const NAV_ITEMS: { id: NavTab; label: string; icon: typeof Activity }[] = [
   { id: "events", label: "Activity Log", icon: FileText },
 ];
 
+const REPEATER_NAV_ITEMS: { id: NavTab; label: string; icon: typeof Activity }[] = [
+  { id: "repeater_link", label: "Main Link", icon: Radio },
+  { id: "nut", label: "UPS Setup", icon: Settings2 },
+  { id: "events", label: "Local Logs", icon: FileText },
+];
+
 export function Layout({
+  role = "main",
   activeTab,
   onSelectTab,
   wsConnected,
   telemetry,
   orchestrator,
   services,
+  repeaterLink,
   versionStatus,
   checkingUpdates,
   onCheckUpdates,
   children,
 }: LayoutProps) {
+  const navItems = role === "repeater" ? REPEATER_NAV_ITEMS : MAIN_NAV_ITEMS;
   const [bannerDismissed, setBannerDismissed] = useState(false);
   const [copiedCmd, setCopiedCmd] = useState(false);
 
@@ -107,8 +123,17 @@ export function Layout({
               <Zap className="h-5 w-5" />
             </div>
             <div>
-              <h1 className="text-base font-bold tracking-tight text-white">WebNUT</h1>
-              <p className="text-[11px] text-slate-400">UPS &amp; Power Orchestrator</p>
+              <div className="flex items-center gap-2">
+                <h1 className="text-base font-bold tracking-tight text-white">WebNUT</h1>
+                {role === "repeater" && (
+                  <span className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30">
+                    Repeater
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-400">
+                {role === "repeater" ? "Remote UPS Repeater Node" : "UPS & Power Orchestrator"}
+              </p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -122,7 +147,7 @@ export function Layout({
               className="lg:hidden inline-flex items-center gap-1 px-2 py-0.5 rounded bg-surface-800 hover:bg-surface-700 border border-slate-700/80 text-[11px] text-slate-300 disabled:opacity-50"
             >
               <RefreshCw className={`h-3 w-3 ${checkingUpdates ? "animate-spin" : ""}`} />
-              <span>v{versionStatus?.current_version ?? "2.2.4"}</span>
+              <span>v{versionStatus?.current_version ?? "2.3.0"}</span>
             </button>
             <span
               title={wsConnected ? "Live WebSocket Connected" : "Reconnecting..."}
@@ -139,7 +164,7 @@ export function Layout({
         </div>
 
         <nav className="p-3 flex lg:flex-col gap-1 overflow-x-auto lg:flex-1 lg:overflow-y-auto">
-          {NAV_ITEMS.map((item) => {
+          {navItems.map((item) => {
             const Icon = item.icon;
             const active = activeTab === item.id;
             return (
@@ -166,10 +191,31 @@ export function Layout({
               {upsStatus}
             </span>
           </div>
-          <div className="flex items-center justify-between">
-            <span className="text-slate-400">Recovery State</span>
-            <span className="font-mono text-slate-200">{orchestrator.state}</span>
-          </div>
+          {role === "repeater" ? (
+            <div className="flex items-center justify-between">
+              <span className="text-slate-400">Main Link</span>
+              <span
+                className={`px-2 py-0.5 rounded border font-mono text-[11px] font-semibold ${
+                  repeaterLink?.connected
+                    ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/40"
+                    : repeaterLink?.paired
+                    ? "bg-amber-500/15 text-amber-300 border-amber-500/40"
+                    : "bg-slate-800 text-slate-300 border-slate-700"
+                }`}
+              >
+                {repeaterLink?.connected
+                  ? "CONNECTED"
+                  : repeaterLink?.paired
+                  ? "RECONNECTING"
+                  : "UNPAIRED"}
+              </span>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between">
+              <span className="text-slate-400">Recovery State</span>
+              <span className="font-mono text-slate-200">{orchestrator.state}</span>
+            </div>
+          )}
           <div className="pt-2 border-t border-slate-800/60 space-y-1.5">
             <div className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold">
               NUT Daemons
@@ -197,7 +243,7 @@ export function Layout({
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5">
                 <span className="text-slate-400 font-mono">
-                  v{versionStatus?.current_version ?? "2.2.4"}
+                  v{versionStatus?.current_version ?? "2.3.0"}
                 </span>
                 {versionStatus?.update_available && (
                   <span

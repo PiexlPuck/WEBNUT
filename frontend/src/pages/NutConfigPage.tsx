@@ -46,6 +46,7 @@ interface NutConfigPageProps {
   services: NutServiceStatus[];
   telemetry: TelemetrySnapshot;
   onRefresh: () => Promise<void>;
+  repeaterMode?: boolean;
 }
 
 function sanitizeUpsId(raw: string, fallback = "ups1"): string {
@@ -122,7 +123,12 @@ const SNMP_MIBS = [
   "netvision",
 ];
 
-export function NutConfigPage({ services, telemetry, onRefresh }: NutConfigPageProps) {
+export function NutConfigPage({
+  services,
+  telemetry,
+  onRefresh,
+  repeaterMode = false,
+}: NutConfigPageProps) {
   const [sourceTab, setSourceTab] = useState<"usb" | "snmp" | "external">("usb");
   const [repeater, setRepeater] = useState<RepeaterStatusResponse | null>(null);
   const [policy, setPolicy] = useState<OrchestratorConfig | null>(null);
@@ -207,6 +213,12 @@ export function NutConfigPage({ services, telemetry, onRefresh }: NutConfigPageP
 
   const loadTopState = useCallback(async () => {
     try {
+      if (repeaterMode) {
+        const upsCfg = await api.getNutConfig<UpsConfData>("ups.conf");
+        setConfiguredUps(upsCfg.parsed?.ups_list ?? []);
+        setUpsGlobalDirectives(upsCfg.parsed?.global_directives ?? []);
+        return;
+      }
       const [cfg, rep, orch, upsCfg] = await Promise.all([
         api.getNutConnection(),
         api.getRepeaterStatus(),
@@ -230,7 +242,7 @@ export function NutConfigPage({ services, telemetry, onRefresh }: NutConfigPageP
     } catch {
       // Ignore initial load error
     }
-  }, []);
+  }, [repeaterMode]);
 
   useEffect(() => {
     void loadTopState();
@@ -707,31 +719,37 @@ export function NutConfigPage({ services, telemetry, onRefresh }: NutConfigPageP
       </div>
 
       {/* Services & Repeater Status Strip */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
-        <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-4 flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <Radio className="h-4 w-4 text-indigo-400 shrink-0" />
-              <span className="font-mono text-sm font-semibold text-white">repeater</span>
-              <span
-                className={`text-[11px] px-2 py-0.5 rounded border uppercase font-semibold ${
-                  repeater?.running
-                    ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
-                    : "bg-rose-500/15 text-rose-300 border-rose-500/30"
-                }`}
-              >
-                {repeater?.running ? `:${repeater.port}` : "offline"}
-              </span>
+      <div
+        className={`grid grid-cols-1 sm:grid-cols-2 ${
+          repeaterMode ? "xl:grid-cols-3" : "xl:grid-cols-4"
+        } gap-3`}
+      >
+        {!repeaterMode && (
+          <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-4 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <Radio className="h-4 w-4 text-indigo-400 shrink-0" />
+                <span className="font-mono text-sm font-semibold text-white">repeater</span>
+                <span
+                  className={`text-[11px] px-2 py-0.5 rounded border uppercase font-semibold ${
+                    repeater?.running
+                      ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                      : "bg-rose-500/15 text-rose-300 border-rose-500/30"
+                  }`}
+                >
+                  {repeater?.running ? `:${repeater.port}` : "offline"}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400 truncate mt-1" title={repeater?.error || ""}>
+                {repeater?.error
+                  ? repeater.error
+                  : `${repeater?.mirrored_ups_count ?? 0} mirrored • ${
+                      repeater?.virtual_ups_count ?? 0
+                    } virtual stream(s)`}
+              </p>
             </div>
-            <p className="text-[11px] text-slate-400 truncate mt-1" title={repeater?.error || ""}>
-              {repeater?.error
-                ? repeater.error
-                : `${repeater?.mirrored_ups_count ?? 0} mirrored • ${
-                    repeater?.virtual_ups_count ?? 0
-                  } virtual stream(s)`}
-            </p>
           </div>
-        </div>
+        )}
 
         {services.map((svc) => (
           <div
@@ -831,18 +849,20 @@ export function NutConfigPage({ services, telemetry, onRefresh }: NutConfigPageP
               <Network className="h-3.5 w-3.5" />
               SNMP Network UPS
             </button>
-            <button
-              type="button"
-              onClick={() => setSourceTab("external")}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium ${
-                sourceTab === "external"
-                  ? "bg-indigo-600 text-white"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              <Globe className="h-3.5 w-3.5" />
-              Existing NUT Server (Repeater)
-            </button>
+            {!repeaterMode && (
+              <button
+                type="button"
+                onClick={() => setSourceTab("external")}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium ${
+                  sourceTab === "external"
+                    ? "bg-indigo-600 text-white"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                <Globe className="h-3.5 w-3.5" />
+                Existing NUT Server (Repeater)
+              </button>
+            )}
           </div>
         </div>
 
@@ -1046,7 +1066,7 @@ export function NutConfigPage({ services, telemetry, onRefresh }: NutConfigPageP
           </div>
         )}
 
-        {sourceTab === "external" && (
+        {!repeaterMode && sourceTab === "external" && (
           <div className="space-y-3">
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
               <div>
@@ -1255,7 +1275,7 @@ export function NutConfigPage({ services, telemetry, onRefresh }: NutConfigPageP
       </div>
 
       {/* Global UPS Disconnect Grace & Repeater Policy Card */}
-      {policy && (
+      {!repeaterMode && policy && (
         <div className="rounded-2xl border border-slate-800 bg-surface-900 p-5 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
             <div className="flex items-center gap-2">

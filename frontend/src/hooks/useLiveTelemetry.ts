@@ -6,6 +6,9 @@ import type {
   HostRecord,
   NutServiceStatus,
   OrchestratorState,
+  RepeaterLinkStatus,
+  RepeaterNodeView,
+  SystemInfo,
   TelemetrySnapshot,
 } from "../types";
 
@@ -51,10 +54,13 @@ function normalizeHost(raw: Record<string, unknown>): HostRecord {
 
 export interface LiveState {
   wsConnected: boolean;
+  systemInfo: SystemInfo | null;
   telemetry: TelemetrySnapshot;
   hosts: HostRecord[];
   orchestrator: OrchestratorState;
   services: NutServiceStatus[];
+  repeaterNodes: RepeaterNodeView[];
+  repeaterLink: RepeaterLinkStatus | null;
   recentEvents: EventLogEntry[];
   versionStatus: AppVersionStatus | null;
   checkingUpdates: boolean;
@@ -85,10 +91,13 @@ const DEFAULT_ORCHESTRATOR: OrchestratorState = {
 
 export function useLiveTelemetry(): LiveState {
   const [wsConnected, setWsConnected] = useState(false);
+  const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
   const [telemetry, setTelemetry] = useState<TelemetrySnapshot>(DEFAULT_TELEMETRY);
   const [hosts, setHosts] = useState<HostRecord[]>([]);
   const [orchestrator, setOrchestrator] = useState<OrchestratorState>(DEFAULT_ORCHESTRATOR);
   const [services, setServices] = useState<NutServiceStatus[]>([]);
+  const [repeaterNodes, setRepeaterNodes] = useState<RepeaterNodeView[]>([]);
+  const [repeaterLink, setRepeaterLink] = useState<RepeaterLinkStatus | null>(null);
   const [recentEvents, setRecentEvents] = useState<EventLogEntry[]>([]);
   const [versionStatus, setVersionStatus] = useState<AppVersionStatus | null>(null);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
@@ -102,7 +111,7 @@ export function useLiveTelemetry(): LiveState {
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to reach WebNUT backend";
       setVersionStatus((prev) => ({
-        current_version: prev?.current_version ?? "2.2.4",
+        current_version: prev?.current_version ?? "2.3.0",
         latest_version: prev?.latest_version ?? null,
         update_available: prev?.update_available ?? false,
         release_url: prev?.release_url ?? null,
@@ -120,20 +129,39 @@ export function useLiveTelemetry(): LiveState {
 
   const refreshAll = useCallback(async () => {
     try {
-      const [tel, h, orch, svc, ev, ver] = await Promise.all([
-        api.getTelemetry(),
-        api.getHosts(),
-        api.getOrchestratorStatus(),
-        api.getServices(),
-        api.getEvents({ limit: 15, offset: 0 }),
-        api.getVersionStatus(),
-      ]);
-      setTelemetry(tel);
-      setHosts(h);
-      setOrchestrator(orch);
-      setServices(svc);
-      setRecentEvents(ev.items);
-      setVersionStatus(ver);
+      const info = await api.getSystemInfo();
+      setSystemInfo(info);
+      if (info.role === "repeater") {
+        const [tel, svc, ev, ver, link] = await Promise.all([
+          api.getTelemetry(),
+          api.getServices(),
+          api.getEvents({ limit: 15, offset: 0 }),
+          api.getVersionStatus(),
+          api.getRepeaterLink(),
+        ]);
+        setTelemetry(tel);
+        setServices(svc);
+        setRecentEvents(ev.items);
+        setVersionStatus(ver);
+        setRepeaterLink(link);
+      } else {
+        const [tel, h, orch, svc, ev, ver, nodes] = await Promise.all([
+          api.getTelemetry(),
+          api.getHosts(),
+          api.getOrchestratorStatus(),
+          api.getServices(),
+          api.getEvents({ limit: 15, offset: 0 }),
+          api.getVersionStatus(),
+          api.getRepeaterNodes(),
+        ]);
+        setTelemetry(tel);
+        setHosts(h);
+        setOrchestrator(orch);
+        setServices(svc);
+        setRecentEvents(ev.items);
+        setVersionStatus(ver);
+        setRepeaterNodes(nodes);
+      }
     } catch {
       // Ignore transient hydration failures
     }
@@ -168,6 +196,10 @@ export function useLiveTelemetry(): LiveState {
             setOrchestrator(msg.data as OrchestratorState);
           } else if (msg.type === "services") {
             setServices(msg.data as NutServiceStatus[]);
+          } else if (msg.type === "repeaters") {
+            setRepeaterNodes(msg.data as RepeaterNodeView[]);
+          } else if (msg.type === "repeater_link") {
+            setRepeaterLink(msg.data as RepeaterLinkStatus);
           } else if (msg.type === "event") {
             const item = msg.data as EventLogEntry;
             setRecentEvents((prev) => [item, ...prev.filter((e) => e.id !== item.id)].slice(0, 25));
@@ -203,10 +235,13 @@ export function useLiveTelemetry(): LiveState {
 
   return {
     wsConnected,
+    systemInfo,
     telemetry,
     hosts,
     orchestrator,
     services,
+    repeaterNodes,
+    repeaterLink,
     recentEvents,
     versionStatus,
     checkingUpdates,

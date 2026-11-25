@@ -1,0 +1,26 @@
+services:
+  webnut-repeater:
+    build: .
+    container_name: webnut-repeater
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+    # Uncomment privileged mode if hot-plugging USB UPS devices without container restart
+    # privileged: true
+    environment:
+      - TZ=${TZ:-UTC}
+      - WEBNUT_ROLE=repeater
+      - WEB_PORT=${WEB_PORT:-8765}
+      - WEBNUT_INTERNAL_NUT_PORT=${WEBNUT_INTERNAL_NUT_PORT:-3494}
+      # Optional: pre-pair automatically on first startup (or pair in the Repeater Web UI)
+      - WEBNUT_MAIN_URL=${WEBNUT_MAIN_URL:-}
+      - WEBNUT_JOIN_TOKEN=${WEBNUT_JOIN_TOKEN:-}
+      - WEBNUT_NODE_NAME=${WEBNUT_NODE_NAME:-}
+      - WEBNUT_REPEATER_PUBLIC_URL=${WEBNUT_REPEATER_PUBLIC_URL:-}
+    volumes:
+      - ./data/repeater-nut:/etc/nut
+      - ./data/repeater-app:/app/data

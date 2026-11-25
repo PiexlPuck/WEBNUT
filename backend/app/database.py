@@ -22,6 +22,8 @@ DEFAULT_NOTIFICATION_RULES: list[tuple[str, int, int]] = [
     ("app_update_available", 1, 0),
     ("ups_selftest_completed", 1, 0),
     ("ups_selftest_failed", 1, 1),
+    ("repeater_node_offline", 1, 1),
+    ("repeater_node_online", 1, 0),
 ]
 
 
@@ -494,6 +496,78 @@ class Database:
                 )
             await self.conn.execute(
                 "INSERT INTO schema_migrations (version, applied_at) VALUES (11, ?)",
+                (now,),
+            )
+            await self.conn.commit()
+
+        if 12 not in applied:
+            now = utc_now_iso()
+            await self.conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS repeater_nodes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    slug TEXT NOT NULL UNIQUE,
+                    auth_token_hash TEXT NOT NULL,
+                    ui_url TEXT NOT NULL DEFAULT '',
+                    remote_ip TEXT NOT NULL DEFAULT '',
+                    app_version TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    last_seen_at TEXT,
+                    last_ups_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS repeater_join_tokens (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    label TEXT NOT NULL DEFAULT '',
+                    token_hash TEXT NOT NULL UNIQUE,
+                    token_prefix TEXT NOT NULL DEFAULT '',
+                    expires_at TEXT NOT NULL,
+                    max_uses INTEGER NOT NULL DEFAULT 1,
+                    use_count INTEGER NOT NULL DEFAULT 0,
+                    revoked INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS repeater_link_config (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    paired INTEGER NOT NULL DEFAULT 0,
+                    main_url TEXT NOT NULL DEFAULT '',
+                    node_id INTEGER,
+                    node_name TEXT NOT NULL DEFAULT '',
+                    node_slug TEXT NOT NULL DEFAULT '',
+                    auth_token_enc TEXT NOT NULL DEFAULT '',
+                    public_url TEXT NOT NULL DEFAULT '',
+                    push_interval_sec INTEGER NOT NULL DEFAULT 3,
+                    updated_at TEXT NOT NULL
+                );
+                """
+            )
+            await self.conn.execute(
+                """
+                INSERT OR IGNORE INTO repeater_link_config (
+                    id, paired, main_url, node_id, node_name, node_slug,
+                    auth_token_enc, public_url, push_interval_sec, updated_at
+                ) VALUES (1, 0, '', NULL, '', '', '', '', 3, ?)
+                """,
+                (now,),
+            )
+            for event_type, enabled, priority in (
+                ("repeater_node_offline", 1, 1),
+                ("repeater_node_online", 1, 0),
+            ):
+                await self.conn.execute(
+                    """
+                    INSERT OR IGNORE INTO notification_rules (
+                        event_type, enabled, priority, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (event_type, enabled, priority, now),
+                )
+            await self.conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (12, ?)",
                 (now,),
             )
             await self.conn.commit()

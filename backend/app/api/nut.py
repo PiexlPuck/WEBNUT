@@ -68,8 +68,13 @@ async def _get_connection_row(db) -> dict:
 
 @router.get("/telemetry", response_model=TelemetrySnapshot)
 async def get_telemetry(request: Request) -> TelemetrySnapshot:
-    orchestrator = request.app.state.orchestrator
-    return TelemetrySnapshot.model_validate(orchestrator.latest_telemetry)
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+    if orchestrator is not None:
+        return TelemetrySnapshot.model_validate(orchestrator.latest_telemetry)
+    agent = getattr(request.app.state, "repeater_agent", None)
+    if agent is not None:
+        return TelemetrySnapshot.model_validate(agent.latest_telemetry)
+    return TelemetrySnapshot(connected=False, error="Initializing", ups_list=[], updated_at=utc_now_iso())
 
 
 @router.post("/scan", response_model=list[ScannedUsbDevice])
@@ -153,11 +158,19 @@ async def _ensure_internal_upsd_port(request: Request) -> None:
 async def _refresh_live_telemetry(request: Request) -> None:
     nut_client = getattr(request.app.state, "nut_client", None)
     orchestrator = getattr(request.app.state, "orchestrator", None)
+    agent = getattr(request.app.state, "repeater_agent", None)
+    if agent is not None:
+        try:
+            await agent.poll_local_once()
+        except Exception:
+            pass
+        return
     if nut_client is None or orchestrator is None:
         return
     try:
         snapshot = await nut_client.fetch_telemetry()
-        await orchestrator.evaluate_telemetry(snapshot.model_dump())
+        merged = orchestrator._build_merged_snapshot(snapshot.model_dump())
+        await orchestrator.evaluate_telemetry(merged)
     except Exception:
         pass
 

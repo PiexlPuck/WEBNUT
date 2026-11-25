@@ -96,17 +96,31 @@ export function Layout({
               <p className="text-[11px] text-slate-400">UPS &amp; Power Orchestrator</p>
             </div>
           </div>
-          <span
-            title={wsConnected ? "Live WebSocket Connected" : "Reconnecting..."}
-            className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full border ${
-              wsConnected
-                ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
-                : "bg-rose-500/10 text-rose-400 border-rose-500/30"
-            }`}
-          >
-            {wsConnected ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
-            {wsConnected ? "Live" : "Off"}
-          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                setBannerDismissed(false);
+                void onCheckUpdates();
+              }}
+              disabled={checkingUpdates}
+              title="Check for WebNUT updates"
+              className="lg:hidden inline-flex items-center gap-1 px-2 py-0.5 rounded bg-surface-800 hover:bg-surface-700 border border-slate-700/80 text-[11px] text-slate-300 disabled:opacity-50"
+            >
+              <RefreshCw className={`h-3 w-3 ${checkingUpdates ? "animate-spin" : ""}`} />
+              <span>v{versionStatus?.current_version ?? "2.1.0"}</span>
+            </button>
+            <span
+              title={wsConnected ? "Live WebSocket Connected" : "Reconnecting..."}
+              className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full border ${
+                wsConnected
+                  ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+                  : "bg-rose-500/10 text-rose-400 border-rose-500/30"
+              }`}
+            >
+              {wsConnected ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
+              {wsConnected ? "Live" : "Off"}
+            </span>
+          </div>
         </div>
 
         <nav className="p-3 flex lg:flex-col gap-1 overflow-x-auto">
@@ -164,30 +178,54 @@ export function Layout({
             ))}
           </div>
 
-          <div className="pt-2 border-t border-slate-800/60 flex items-center justify-between gap-2">
-            <div className="flex items-center gap-1.5">
-              <span className="text-slate-400 font-mono">
-                v{versionStatus?.current_version ?? "1.0.0"}
-              </span>
-              {versionStatus?.update_available && (
-                <span
-                  title={`Update available: v${versionStatus.latest_version}`}
-                  className="h-2 w-2 rounded-full bg-amber-400 animate-pulse"
-                />
-              )}
+          <div className="pt-2 border-t border-slate-800/60 space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5">
+                <span className="text-slate-400 font-mono">
+                  v{versionStatus?.current_version ?? "2.1.0"}
+                </span>
+                {versionStatus?.update_available && (
+                  <span
+                    title={`Update available: v${versionStatus.latest_version}`}
+                    className="h-2 w-2 rounded-full bg-amber-400 animate-pulse"
+                  />
+                )}
+              </div>
+              <button
+                onClick={() => {
+                  setBannerDismissed(false);
+                  void onCheckUpdates();
+                }}
+                disabled={checkingUpdates}
+                title="Check for WebNUT updates"
+                className="inline-flex items-center gap-1 px-2 py-1 rounded bg-surface-800 hover:bg-surface-700 border border-slate-700/80 text-[11px] text-slate-300 disabled:opacity-50"
+              >
+                <RefreshCw className={`h-3 w-3 ${checkingUpdates ? "animate-spin" : ""}`} />
+                {checkingUpdates ? "Checking..." : "Update"}
+              </button>
             </div>
-            <button
-              onClick={() => {
-                setBannerDismissed(false);
-                void onCheckUpdates();
-              }}
-              disabled={checkingUpdates}
-              title="Check for WEBNUT updates"
-              className="inline-flex items-center gap-1 px-2 py-1 rounded bg-surface-800 hover:bg-surface-700 border border-slate-700/80 text-[11px] text-slate-300 disabled:opacity-50"
-            >
-              <RefreshCw className={`h-3 w-3 ${checkingUpdates ? "animate-spin" : ""}`} />
-              Update
-            </button>
+
+            {checkingUpdates ? (
+              <div className="text-[11px] text-indigo-300">Checking GitHub for updates...</div>
+            ) : versionStatus?.last_error ? (
+              <div
+                title={versionStatus.last_error}
+                className="text-[11px] text-rose-400 truncate"
+              >
+                Check failed: {versionStatus.last_error}
+              </div>
+            ) : versionStatus?.update_available && versionStatus.latest_version ? (
+              <button
+                onClick={() => setBannerDismissed(false)}
+                className="text-[11px] text-amber-300 hover:text-amber-200 underline text-left"
+              >
+                v{versionStatus.latest_version} available — view update command
+              </button>
+            ) : versionStatus?.last_checked_at ? (
+              <div className="text-[11px] text-emerald-400/90">
+                Up to date • {new Date(versionStatus.last_checked_at).toLocaleTimeString()}
+              </div>
+            ) : null}
           </div>
         </div>
       </aside>

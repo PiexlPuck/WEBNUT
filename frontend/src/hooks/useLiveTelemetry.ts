@@ -99,6 +99,20 @@ export function useLiveTelemetry(): LiveState {
     try {
       const status = await api.checkForUpdates();
       setVersionStatus(status);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to reach WebNUT backend";
+      setVersionStatus((prev) => ({
+        current_version: prev?.current_version ?? "2.1.0",
+        latest_version: prev?.latest_version ?? null,
+        update_available: prev?.update_available ?? false,
+        release_url: prev?.release_url ?? null,
+        release_notes: prev?.release_notes ?? null,
+        last_checked_at: new Date().toISOString(),
+        last_error: msg,
+        notified_version: prev?.notified_version ?? null,
+        notified_at: prev?.notified_at ?? null,
+        github_repo: prev?.github_repo ?? "PiexlPuck/WEBNUT",
+      }));
     } finally {
       setCheckingUpdates(false);
     }

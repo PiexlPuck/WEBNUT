@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from pathlib import Path
 
 import httpx
@@ -108,53 +109,77 @@ class VersionChecker:
             github_repo=self.github_repo,
         )
 
-    async def _fetch_remote_release(self) -> tuple[str, str, str | None]:
-        """Return (latest_version, release_url, release_notes) from GitHub Releases or VERSION fallback."""
+    async def _fetch_with_client(
+        self, client: httpx.AsyncClient
+    ) -> tuple[str, str, str | None]:
+        """Query GitHub Releases and raw VERSION with cache-busting, picking the newest semver."""
         headers = {
             "Accept": "application/vnd.github+json",
             "User-Agent": f"WEBNUT/{self.current_version}",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
         }
         release_api = f"https://api.github.com/repos/{self.github_repo}/releases/latest"
-        raw_version_url = f"https://raw.githubusercontent.com/{self.github_repo}/main/VERSION"
+        raw_version_url = (
+            f"https://raw.githubusercontent.com/{self.github_repo}/main/VERSION?t={int(time.time())}"
+        )
         repo_url = f"https://github.com/{self.github_repo}"
 
-        async def _get(client: httpx.AsyncClient, url: str) -> httpx.Response:
-            return await client.get(url, headers=headers, timeout=10.0)
+        errors: list[str] = []
+        release_candidate: tuple[str, str, str | None] | None = None
+        raw_candidate: tuple[str, str, str | None] | None = None
 
-        if self.http_client is not None:
-            client = self.http_client
-            resp = await _get(client, release_api)
+        try:
+            resp = await client.get(release_api, headers=headers, timeout=10.0)
             if resp.status_code == 200:
                 data = resp.json()
                 tag = str(data.get("tag_name") or data.get("name") or "").strip().lstrip("v")
                 if parse_semver(tag):
-                    return tag, str(data.get("html_url") or repo_url), data.get("body")
-            if resp.status_code not in (404, 200):
-                raise RuntimeError(f"GitHub API returned HTTP {resp.status_code}")
+                    release_candidate = (tag, str(data.get("html_url") or repo_url), data.get("body"))
+            elif resp.status_code != 404:
+                errors.append(f"GitHub API HTTP {resp.status_code}")
+        except Exception as exc:
+            errors.append(f"GitHub API error: {exc}")
 
-            raw_resp = await _get(client, raw_version_url)
+        try:
+            raw_resp = await client.get(
+                raw_version_url,
+                headers={"User-Agent": f"WEBNUT/{self.current_version}", "Cache-Control": "no-cache", "Pragma": "no-cache"},
+                timeout=10.0,
+            )
             if raw_resp.status_code == 200:
                 ver = raw_resp.text.strip().lstrip("v")
                 if parse_semver(ver):
-                    return ver, repo_url, None
-            raise RuntimeError(f"Failed to fetch version metadata (HTTP {raw_resp.status_code})")
+                    raw_candidate = (ver, repo_url, None)
+                else:
+                    errors.append("Remote VERSION file is not valid semver")
+            else:
+                errors.append(f"Raw VERSION HTTP {raw_resp.status_code}")
+        except Exception as exc:
+            errors.append(f"Raw VERSION error: {exc}")
+
+        if release_candidate and raw_candidate:
+            rel_t = parse_semver(release_candidate[0])
+            raw_t = parse_semver(raw_candidate[0])
+            if raw_t is not None and rel_t is not None and raw_t > rel_t:
+                return raw_candidate
+            return release_candidate
+
+        if release_candidate:
+            return release_candidate
+        if raw_candidate:
+            return raw_candidate
+
+        detail = "; ".join(errors) if errors else "No release or VERSION found"
+        raise RuntimeError(f"Failed to check GitHub updates ({detail})")
+
+    async def _fetch_remote_release(self) -> tuple[str, str, str | None]:
+        """Return (latest_version, release_url, release_notes) from GitHub Releases or VERSION fallback."""
+        if self.http_client is not None:
+            return await self._fetch_with_client(self.http_client)
 
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            resp = await _get(client, release_api)
-            if resp.status_code == 200:
-                data = resp.json()
-                tag = str(data.get("tag_name") or data.get("name") or "").strip().lstrip("v")
-                if parse_semver(tag):
-                    return tag, str(data.get("html_url") or repo_url), data.get("body")
-            if resp.status_code not in (404, 200):
-                raise RuntimeError(f"GitHub API returned HTTP {resp.status_code}")
-
-            raw_resp = await _get(client, raw_version_url)
-            if raw_resp.status_code == 200:
-                ver = raw_resp.text.strip().lstrip("v")
-                if parse_semver(ver):
-                    return ver, repo_url, None
-            raise RuntimeError(f"Failed to fetch version metadata (HTTP {raw_resp.status_code})")
+            return await self._fetch_with_client(client)
 
     async def check_now(self) -> AppVersionStatus:
         """Check GitHub for updates and send at most one notification ever if an update exists."""

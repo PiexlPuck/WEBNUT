@@ -112,3 +112,62 @@ async def test_version_checker_raw_version_fallback_when_no_release(db, event_lo
         assert st.latest_version == "1.0.5"
         assert st.update_available is True
         assert st.release_url == "https://github.com/PiexlPuck/WEBNUT"
+
+
+@pytest.mark.asyncio
+async def test_version_checker_falls_back_on_github_api_403_rate_limit(db, event_log) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "api.github.com" in url:
+            return httpx.Response(403, json={"message": "API rate limit exceeded"})
+        if "raw.githubusercontent.com/PiexlPuck/WEBNUT/main/VERSION" in url:
+            return httpx.Response(200, text="2.1.0\n")
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        dispatcher = NotificationDispatcher(db, event_log, http_client=client)
+        checker = VersionChecker(
+            db,
+            dispatcher,
+            event_log,
+            http_client=client,
+            current_version="2.0.0",
+        )
+        st = await checker.check_now()
+        assert st.last_error is None
+        assert st.latest_version == "2.1.0"
+        assert st.update_available is True
+
+
+@pytest.mark.asyncio
+async def test_version_checker_prefers_newer_raw_version_over_older_release(db, event_log) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "api.github.com/repos/PiexlPuck/WEBNUT/releases/latest" in url:
+            return httpx.Response(
+                200,
+                json={
+                    "tag_name": "v1.0.0",
+                    "html_url": "https://github.com/PiexlPuck/WEBNUT/releases/tag/v1.0.0",
+                },
+            )
+        if "raw.githubusercontent.com/PiexlPuck/WEBNUT/main/VERSION" in url:
+            return httpx.Response(200, text="2.1.0\n")
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        dispatcher = NotificationDispatcher(db, event_log, http_client=client)
+        checker = VersionChecker(
+            db,
+            dispatcher,
+            event_log,
+            http_client=client,
+            current_version="2.0.0",
+        )
+        st = await checker.check_now()
+        assert st.last_error is None
+        assert st.latest_version == "2.1.0"
+        assert st.update_available is True
+

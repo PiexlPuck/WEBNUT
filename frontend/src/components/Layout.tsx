@@ -62,7 +62,8 @@ export function Layout({
   const [bannerDismissed, setBannerDismissed] = useState(false);
   const [copiedCmd, setCopiedCmd] = useState(false);
 
-  const updateCmd = "git pull && docker compose up -d --build";
+  const updateCmd =
+    "curl -fsSL https://raw.githubusercontent.com/PiexlPuck/WEBNUT/main/scripts/install.sh | bash -s -- --update";
   const copyUpdateCmd = async () => {
     await navigator.clipboard.writeText(updateCmd);
     setCopiedCmd(true);

@@ -247,6 +247,35 @@ class Database:
             )
             await self.conn.commit()
 
+        if 4 not in applied:
+            now = utc_now_iso()
+            await self.conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS nut_connection_config (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    mode TEXT NOT NULL DEFAULT 'local',
+                    host TEXT NOT NULL DEFAULT '127.0.0.1',
+                    port INTEGER NOT NULL DEFAULT 3493,
+                    username TEXT NOT NULL DEFAULT '',
+                    password TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+                """
+            )
+            await self.conn.execute(
+                """
+                INSERT OR IGNORE INTO nut_connection_config (
+                    id, mode, host, port, username, password, updated_at
+                ) VALUES (1, 'local', '127.0.0.1', 3493, '', '', ?)
+                """,
+                (now,),
+            )
+            await self.conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (4, ?)",
+                (now,),
+            )
+            await self.conn.commit()
+
     async def fetch_one(self, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
         cur = await self.conn.execute(sql, params)
         row = await cur.fetchone()

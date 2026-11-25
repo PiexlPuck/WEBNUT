@@ -167,6 +167,37 @@ class NutServiceStatus(BaseModel):
     detail: str = ""
 
 
+NutConnectionMode = Literal["local", "external"]
+
+
+class NutConnectionConfigRequest(BaseModel):
+    mode: NutConnectionMode = "local"
+    host: str = Field(default="127.0.0.1", min_length=1, max_length=255)
+    port: int = Field(default=3493, ge=1, le=65535)
+    username: str = Field(default="", max_length=64)
+    password: str = Field(default="", max_length=256)
+
+
+class NutConnectionConfigView(BaseModel):
+    mode: NutConnectionMode
+    host: str
+    port: int
+    username: str
+    password: str
+    password_configured: bool
+
+
+class NutConnectionTestRequest(BaseModel):
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(default=3493, ge=1, le=65535)
+
+
+class NutConnectionTestResponse(BaseModel):
+    ok: bool
+    message: str
+    ups_list: list[UpsTelemetry] = Field(default_factory=list)
+
+
 class UpsTelemetry(BaseModel):
     name: str
     description: str = ""

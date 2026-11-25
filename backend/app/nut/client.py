@@ -63,6 +63,11 @@ class NutTcpClient:
         self.port = port
         self.timeout = timeout
 
+    def configure(self, host: str, port: int) -> None:
+        """Update target upsd host and port dynamically at runtime."""
+        self.host = host.strip()
+        self.port = int(port)
+
     async def _read_list_block(
         self,
         reader: asyncio.StreamReader,

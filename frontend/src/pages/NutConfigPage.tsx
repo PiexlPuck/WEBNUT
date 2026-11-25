@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertOctagon,
   Cable,
   CheckCircle2,
   Cpu,
+  Globe,
+  HardDrive,
   Plus,
   RefreshCw,
   Save,
@@ -17,6 +19,8 @@ import type {
   HardwareScanResponse,
   NutConfData,
   NutConfigFile,
+  NutConnectionConfigPayload,
+  NutConnectionTestResponse,
   NutServiceStatus,
   ScannedUsbDevice,
   SerialDeviceInfo,
@@ -41,14 +45,28 @@ const CONFIG_TABS: NutConfigFile[] = [
 
 export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
   const [activeFile, setActiveFile] = useState<NutConfigFile>("ups.conf");
+  const [loadedFile, setLoadedFile] = useState<NutConfigFile | null>(null);
   const [parsedData, setParsedData] = useState<Record<string, unknown> | null>(null);
   const [rawPreview, setRawPreview] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [restartingSvc, setRestartingSvc] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ ok: boolean; msg: string; stderr?: string } | null>(
     null
   );
+  const loadSeqRef = useRef(0);
+
+  // NUT Server Source (Local Built-in vs External Existing NUT Server)
+  const [connForm, setConnForm] = useState<NutConnectionConfigPayload>({
+    mode: "local",
+    host: "127.0.0.1",
+    port: 3493,
+    username: "",
+    password: "",
+  });
+  const [testingConn, setTestingConn] = useState(false);
+  const [savingConn, setSavingConn] = useState(false);
+  const [connTestResult, setConnTestResult] = useState<NutConnectionTestResponse | null>(null);
 
   // Hardware Scanner Modal (USB + Serial + lsusb)
   const [scanOpen, setScanOpen] = useState(false);
@@ -57,22 +75,102 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
   const [scanResult, setScanResult] = useState<HardwareScanResponse | null>(null);
   const [serialDriverChoices, setSerialDriverChoices] = useState<Record<string, string>>({});
 
-  const loadFile = useCallback(async (file: NutConfigFile) => {
-    setLoading(true);
+  useEffect(() => {
+    void (async () => {
+      try {
+        const cfg = await api.getNutConnection();
+        setConnForm({
+          mode: cfg.mode,
+          host: cfg.host,
+          port: cfg.port,
+          username: cfg.username,
+          password: cfg.password,
+        });
+      } catch {
+        // Ignore initial connection fetch error
+      }
+    })();
+  }, []);
+
+  const handleTestConnection = async () => {
+    setTestingConn(true);
+    setConnTestResult(null);
+    try {
+      const res = await api.testNutConnection(connForm.host, connForm.port);
+      setConnTestResult(res);
+    } catch (err) {
+      setConnTestResult({
+        ok: false,
+        message: err instanceof ApiError ? err.message : "Connection test failed",
+        ups_list: [],
+      });
+    } finally {
+      setTestingConn(false);
+    }
+  };
+
+  const handleSaveConnection = async (overrideMode?: "local" | "external") => {
+    setSavingConn(true);
     setFeedback(null);
     try {
-      const res = await api.getNutConfig<Record<string, unknown>>(file);
-      setParsedData(res.parsed);
-      setRawPreview(res.raw);
+      const nextPayload = overrideMode ? { ...connForm, mode: overrideMode } : connForm;
+      const saved = await api.saveNutConnection(nextPayload);
+      setConnForm({
+        mode: saved.mode,
+        host: saved.host,
+        port: saved.port,
+        username: saved.username,
+        password: saved.password,
+      });
+      setFeedback({
+        ok: true,
+        msg:
+          saved.mode === "external"
+            ? `Connected WEBNUT to existing NUT server at ${saved.host}:${saved.port}.`
+            : "Switched to built-in local NUT server.",
+      });
+      await onRefresh();
     } catch (err) {
+      setFeedback({
+        ok: false,
+        msg: err instanceof ApiError ? err.message : "Failed to save NUT connection mode",
+      });
+    } finally {
+      setSavingConn(false);
+    }
+  };
+
+  const loadFile = useCallback(async (file: NutConfigFile) => {
+    const seq = ++loadSeqRef.current;
+    setLoading(true);
+    setParsedData(null);
+    setLoadedFile(null);
+    try {
+      const res = await api.getNutConfig<Record<string, unknown>>(file);
+      if (seq !== loadSeqRef.current) return;
+      setParsedData(res.parsed ?? {});
+      setLoadedFile(file);
+      setRawPreview(res.raw ?? "");
+    } catch (err) {
+      if (seq !== loadSeqRef.current) return;
       setFeedback({
         ok: false,
         msg: err instanceof ApiError ? err.message : `Failed to load ${file}`,
       });
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) {
+        setLoading(false);
+      }
     }
   }, []);
+
+  const handleSelectFile = (file: NutConfigFile) => {
+    setFeedback(null);
+    setLoading(true);
+    setParsedData(null);
+    setLoadedFile(null);
+    setActiveFile(file);
+  };
 
   useEffect(() => {
     void loadFile(activeFile);
@@ -225,6 +323,170 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
         </button>
       </div>
 
+      {/* NUT Server Source Card (Local vs Join Existing NUT Server) */}
+      <div className="rounded-2xl border border-slate-800 bg-surface-900 p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-white">NUT Server Source</h3>
+            <p className="text-xs text-slate-400">
+              Run WEBNUT&apos;s built-in NUT server or join an existing NUT server (`upsd`) on your
+              network/host
+            </p>
+          </div>
+          <div className="inline-flex rounded-lg bg-surface-950 border border-slate-800 p-1">
+            <button
+              type="button"
+              onClick={() => {
+                setConnTestResult(null);
+                setConnForm((prev) => ({ ...prev, mode: "local" }));
+              }}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                connForm.mode === "local"
+                  ? "bg-indigo-600 text-white"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              <HardDrive className="h-3.5 w-3.5" />
+              Built-in Local Server
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setConnTestResult(null);
+                setConnForm((prev) => ({
+                  ...prev,
+                  mode: "external",
+                  host: prev.host === "127.0.0.1" ? "" : prev.host,
+                }));
+              }}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                connForm.mode === "external"
+                  ? "bg-indigo-600 text-white"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              <Globe className="h-3.5 w-3.5" />
+              Join Existing NUT Server
+            </button>
+          </div>
+        </div>
+
+        {connForm.mode === "external" ? (
+          <div className="space-y-3 pt-2 border-t border-slate-800">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">
+                  Existing NUT Server IP / Host
+                </label>
+                <input
+                  value={connForm.host}
+                  onChange={(e) => setConnForm({ ...connForm, host: e.target.value })}
+                  placeholder="192.168.1.10 (or 127.0.0.1)"
+                  className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-xs font-mono text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">Port</label>
+                <input
+                  type="number"
+                  value={connForm.port}
+                  onChange={(e) => setConnForm({ ...connForm, port: Number(e.target.value) })}
+                  className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-xs font-mono text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">
+                  Username (Optional)
+                </label>
+                <input
+                  value={connForm.username}
+                  onChange={(e) => setConnForm({ ...connForm, username: e.target.value })}
+                  placeholder="monuser"
+                  className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-xs font-mono text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">
+                  Password (Optional)
+                </label>
+                <input
+                  type="password"
+                  value={connForm.password}
+                  onChange={(e) => setConnForm({ ...connForm, password: e.target.value })}
+                  placeholder="••••••••"
+                  className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-xs font-mono text-white"
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-[11px] text-slate-400">
+                Telemetry, OB → OL WoL recovery, Pushover alerts, and live client tracking will all
+                use this NUT server. Local `upsd` &amp; `drivers` stay stopped to avoid conflicts.
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleTestConnection()}
+                  disabled={testingConn || !connForm.host.trim()}
+                  className="px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 border border-slate-700 text-xs font-medium text-slate-200 disabled:opacity-50"
+                >
+                  {testingConn ? "Testing..." : "Test Connection"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSaveConnection("external")}
+                  disabled={savingConn || !connForm.host.trim()}
+                  className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white disabled:opacity-50"
+                >
+                  {savingConn ? "Connecting..." : "Save & Connect"}
+                </button>
+              </div>
+            </div>
+
+            {connTestResult && (
+              <div
+                className={`rounded-xl border p-3 text-xs space-y-1.5 ${
+                  connTestResult.ok
+                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                    : "border-rose-500/40 bg-rose-500/10 text-rose-300"
+                }`}
+              >
+                <div className="font-medium">{connTestResult.message}</div>
+                {connTestResult.ups_list.length > 0 && (
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {connTestResult.ups_list.map((u) => (
+                      <span
+                        key={u.name}
+                        className="px-2 py-0.5 rounded bg-surface-950 border border-emerald-500/30 font-mono text-[11px]"
+                      >
+                        {u.name}: {u.status}
+                        {u.battery_charge !== null ? ` (${u.battery_charge}%)` : ""}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="flex items-center justify-between pt-2 border-t border-slate-800 text-xs text-slate-400">
+            <span>
+              Using local built-in NUT daemons (`127.0.0.1:{connForm.port}`) managed via the
+              config files below.
+            </span>
+            <button
+              type="button"
+              onClick={() => void handleSaveConnection("local")}
+              disabled={savingConn}
+              className="px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 border border-slate-700 text-xs text-slate-200 disabled:opacity-50"
+            >
+              {savingConn ? "Applying..." : "Use Built-in Local Server"}
+            </button>
+          </div>
+        )}
+      </div>
+
       {/* Services Status Strip */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         {services.map((svc) => (
@@ -297,7 +559,7 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
           {CONFIG_TABS.map((f) => (
             <button
               key={f}
-              onClick={() => setActiveFile(f)}
+              onClick={() => handleSelectFile(f)}
               className={`px-3.5 py-2 rounded-lg font-mono text-xs font-medium transition-colors ${
                 activeFile === f
                   ? "bg-indigo-600/20 text-indigo-300 border border-indigo-500/40"
@@ -330,7 +592,7 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
       {/* Form Editor + Raw Preview Split */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
         <div className="xl:col-span-7 rounded-2xl border border-slate-800 bg-surface-900 p-5">
-          {loading || !parsedData ? (
+          {loading || !parsedData || loadedFile !== activeFile ? (
             <div className="text-sm text-slate-400 py-8 text-center">Loading {activeFile}...</div>
           ) : (
             <NutFormRenderer
@@ -552,15 +814,18 @@ function NutFormRenderer({
   onChange: (next: Record<string, unknown>) => void;
 }) {
   if (file === "nut.conf") {
-    const d = data as unknown as NutConfData;
+    const d = data as unknown as Partial<NutConfData>;
     return (
       <div className="space-y-4">
         <div>
           <label className="block text-xs font-medium text-slate-300 mb-1.5">NUT Mode</label>
           <select
-            value={d.mode}
+            value={d.mode ?? "netserver"}
             onChange={(e) =>
-              onChange({ ...d, mode: e.target.value as NutConfData["mode"] } as unknown as Record<string, unknown>)
+              onChange({
+                extra_lines: d.extra_lines ?? [],
+                mode: e.target.value as NutConfData["mode"],
+              } as unknown as Record<string, unknown>)
             }
             className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-sm text-white"
           >
@@ -575,11 +840,15 @@ function NutFormRenderer({
   }
 
   if (file === "ups.conf") {
-    const d = data as unknown as UpsConfData;
+    const d = data as unknown as Partial<UpsConfData>;
+    const upsList = d.ups_list ?? [];
     const updateUps = (idx: number, patch: Partial<UpsConfData["ups_list"][number]>) => {
-      const next = [...d.ups_list];
+      const next = [...upsList];
       next[idx] = { ...next[idx], ...patch };
-      onChange({ ...d, ups_list: next } as unknown as Record<string, unknown>);
+      onChange({
+        global_directives: d.global_directives ?? [],
+        ups_list: next,
+      } as unknown as Record<string, unknown>);
     };
     return (
       <div className="space-y-4">
@@ -588,11 +857,11 @@ function NutFormRenderer({
           <button
             onClick={() =>
               onChange({
-                ...d,
+                global_directives: d.global_directives ?? [],
                 ups_list: [
-                  ...d.ups_list,
+                  ...upsList,
                   {
-                    name: `ups${d.ups_list.length + 1}`,
+                    name: `ups${upsList.length + 1}`,
                     driver: "usbhid-ups",
                     port: "auto",
                     desc: "Local UPS",
@@ -608,13 +877,14 @@ function NutFormRenderer({
           </button>
         </div>
 
-        {d.ups_list.length === 0 && (
+        {upsList.length === 0 && (
           <p className="text-xs text-slate-400">
-            No UPS blocks defined. Use &ldquo;Scan for USB UPS&rdquo; or add one manually.
+            No UPS blocks defined. Use &ldquo;Scan Hardware (USB &amp; Serial)&rdquo; or add one
+            manually.
           </p>
         )}
 
-        {d.ups_list.map((ups, idx) => (
+        {upsList.map((ups, idx) => (
           <div
             key={idx}
             className="rounded-xl border border-slate-800 bg-surface-950 p-4 space-y-3"
@@ -624,8 +894,8 @@ function NutFormRenderer({
               <button
                 onClick={() =>
                   onChange({
-                    ...d,
-                    ups_list: d.ups_list.filter((_, i) => i !== idx),
+                    global_directives: d.global_directives ?? [],
+                    ups_list: upsList.filter((_, i) => i !== idx),
                   } as unknown as Record<string, unknown>)
                 }
                 className="text-rose-400 hover:text-rose-300"
@@ -637,7 +907,7 @@ function NutFormRenderer({
               <div>
                 <label className="block text-[11px] text-slate-400 mb-1">Section Name</label>
                 <input
-                  value={ups.name}
+                  value={ups.name ?? ""}
                   onChange={(e) => updateUps(idx, { name: e.target.value })}
                   className="w-full rounded bg-surface-900 border border-slate-700 px-2.5 py-1.5 text-xs font-mono text-white"
                 />
@@ -645,7 +915,7 @@ function NutFormRenderer({
               <div>
                 <label className="block text-[11px] text-slate-400 mb-1">Driver</label>
                 <input
-                  value={ups.driver}
+                  value={ups.driver ?? ""}
                   onChange={(e) => updateUps(idx, { driver: e.target.value })}
                   className="w-full rounded bg-surface-900 border border-slate-700 px-2.5 py-1.5 text-xs font-mono text-white"
                 />
@@ -653,7 +923,7 @@ function NutFormRenderer({
               <div>
                 <label className="block text-[11px] text-slate-400 mb-1">Port</label>
                 <input
-                  value={ups.port}
+                  value={ups.port ?? ""}
                   onChange={(e) => updateUps(idx, { port: e.target.value })}
                   className="w-full rounded bg-surface-900 border border-slate-700 px-2.5 py-1.5 text-xs font-mono text-white"
                 />
@@ -661,7 +931,7 @@ function NutFormRenderer({
               <div>
                 <label className="block text-[11px] text-slate-400 mb-1">Description</label>
                 <input
-                  value={ups.desc}
+                  value={ups.desc ?? ""}
                   onChange={(e) => updateUps(idx, { desc: e.target.value })}
                   className="w-full rounded bg-surface-900 border border-slate-700 px-2.5 py-1.5 text-xs text-white"
                 />
@@ -674,7 +944,8 @@ function NutFormRenderer({
   }
 
   if (file === "upsd.conf") {
-    const d = data as unknown as UpsdConfData;
+    const d = data as unknown as Partial<UpsdConfData>;
+    const listens = d.listens ?? [];
     return (
       <div className="space-y-4">
         <div className="flex items-center justify-between">
@@ -682,8 +953,11 @@ function NutFormRenderer({
           <button
             onClick={() =>
               onChange({
-                ...d,
-                listens: [...d.listens, { address: "0.0.0.0", port: 3493 }],
+                extra_lines: d.extra_lines ?? [],
+                maxage: d.maxage ?? null,
+                maxconn: d.maxconn ?? null,
+                statepath: d.statepath ?? null,
+                listens: [...listens, { address: "0.0.0.0", port: 3493 }],
               } as unknown as Record<string, unknown>)
             }
             className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-surface-800 text-xs text-indigo-300"
@@ -693,12 +967,12 @@ function NutFormRenderer({
           </button>
         </div>
 
-        {d.listens.map((l, idx) => (
+        {listens.map((l, idx) => (
           <div key={idx} className="flex items-center gap-2">
             <input
-              value={l.address}
+              value={l.address ?? ""}
               onChange={(e) => {
-                const next = [...d.listens];
+                const next = [...listens];
                 next[idx] = { ...next[idx], address: e.target.value };
                 onChange({ ...d, listens: next } as unknown as Record<string, unknown>);
               }}
@@ -706,9 +980,9 @@ function NutFormRenderer({
             />
             <input
               type="number"
-              value={l.port}
+              value={l.port ?? 3493}
               onChange={(e) => {
-                const next = [...d.listens];
+                const next = [...listens];
                 next[idx] = { ...next[idx], port: Number(e.target.value) };
                 onChange({ ...d, listens: next } as unknown as Record<string, unknown>);
               }}
@@ -718,7 +992,7 @@ function NutFormRenderer({
               onClick={() =>
                 onChange({
                   ...d,
-                  listens: d.listens.filter((_, i) => i !== idx),
+                  listens: listens.filter((_, i) => i !== idx),
                 } as unknown as Record<string, unknown>)
               }
               className="p-2 text-rose-400"
@@ -765,11 +1039,12 @@ function NutFormRenderer({
   }
 
   if (file === "upsd.users") {
-    const d = data as unknown as UpsdUsersData;
+    const d = data as unknown as Partial<UpsdUsersData>;
+    const users = d.users ?? [];
     const updateUser = (idx: number, patch: Partial<UpsdUsersData["users"][number]>) => {
-      const next = [...d.users];
+      const next = [...users];
       next[idx] = { ...next[idx], ...patch };
-      onChange({ ...d, users: next } as unknown as Record<string, unknown>);
+      onChange({ users: next } as unknown as Record<string, unknown>);
     };
     return (
       <div className="space-y-4">
@@ -778,11 +1053,10 @@ function NutFormRenderer({
           <button
             onClick={() =>
               onChange({
-                ...d,
                 users: [
-                  ...d.users,
+                  ...users,
                   {
-                    username: `user${d.users.length + 1}`,
+                    username: `user${users.length + 1}`,
                     password: "",
                     actions: [],
                     instcmds: [],
@@ -798,7 +1072,7 @@ function NutFormRenderer({
           </button>
         </div>
 
-        {d.users.map((u, idx) => (
+        {users.map((u, idx) => (
           <div
             key={idx}
             className="rounded-xl border border-slate-800 bg-surface-950 p-4 space-y-3"
@@ -810,8 +1084,7 @@ function NutFormRenderer({
               <button
                 onClick={() =>
                   onChange({
-                    ...d,
-                    users: d.users.filter((_, i) => i !== idx),
+                    users: users.filter((_, i) => i !== idx),
                   } as unknown as Record<string, unknown>)
                 }
                 className="text-rose-400"
@@ -823,7 +1096,7 @@ function NutFormRenderer({
               <div>
                 <label className="block text-[11px] text-slate-400 mb-1">Username</label>
                 <input
-                  value={u.username}
+                  value={u.username ?? ""}
                   onChange={(e) => updateUser(idx, { username: e.target.value })}
                   className="w-full rounded bg-surface-900 border border-slate-700 px-2.5 py-1.5 text-xs font-mono text-white"
                 />
@@ -832,7 +1105,7 @@ function NutFormRenderer({
                 <label className="block text-[11px] text-slate-400 mb-1">Password</label>
                 <input
                   type="password"
-                  value={u.password}
+                  value={u.password ?? ""}
                   onChange={(e) => updateUser(idx, { password: e.target.value })}
                   className="w-full rounded bg-surface-900 border border-slate-700 px-2.5 py-1.5 text-xs font-mono text-white"
                 />
@@ -840,7 +1113,7 @@ function NutFormRenderer({
               <div>
                 <label className="block text-[11px] text-slate-400 mb-1">upsmon Role</label>
                 <select
-                  value={u.upsmon_role}
+                  value={u.upsmon_role ?? ""}
                   onChange={(e) =>
                     updateUser(idx, {
                       upsmon_role: e.target.value as "" | "primary" | "secondary",
@@ -858,7 +1131,7 @@ function NutFormRenderer({
                   Actions (space-separated)
                 </label>
                 <input
-                  value={u.actions.join(" ")}
+                  value={(u.actions ?? []).join(" ")}
                   onChange={(e) =>
                     updateUser(idx, {
                       actions: e.target.value.split(/\s+/).filter(Boolean),
@@ -873,7 +1146,7 @@ function NutFormRenderer({
                   Instant Commands (space-separated)
                 </label>
                 <input
-                  value={u.instcmds.join(" ")}
+                  value={(u.instcmds ?? []).join(" ")}
                   onChange={(e) =>
                     updateUser(idx, {
                       instcmds: e.target.value.split(/\s+/).filter(Boolean),
@@ -891,7 +1164,8 @@ function NutFormRenderer({
   }
 
   // upsmon.conf
-  const d = data as unknown as UpsmonConfData;
+  const d = data as unknown as Partial<UpsmonConfData>;
+  const monitors = d.monitors ?? [];
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -899,7 +1173,7 @@ function NutFormRenderer({
           <label className="block text-[11px] text-slate-400 mb-1">POLLFREQ (sec)</label>
           <input
             type="number"
-            value={d.pollfreq}
+            value={d.pollfreq ?? 5}
             onChange={(e) =>
               onChange({ ...d, pollfreq: Number(e.target.value) } as unknown as Record<string, unknown>)
             }
@@ -910,7 +1184,7 @@ function NutFormRenderer({
           <label className="block text-[11px] text-slate-400 mb-1">DEADTIME (sec)</label>
           <input
             type="number"
-            value={d.deadtime}
+            value={d.deadtime ?? 15}
             onChange={(e) =>
               onChange({ ...d, deadtime: Number(e.target.value) } as unknown as Record<string, unknown>)
             }
@@ -920,7 +1194,7 @@ function NutFormRenderer({
         <div className="sm:col-span-2">
           <label className="block text-[11px] text-slate-400 mb-1">SHUTDOWNCMD</label>
           <input
-            value={d.shutdowncmd}
+            value={d.shutdowncmd ?? "/bin/true"}
             onChange={(e) =>
               onChange({ ...d, shutdowncmd: e.target.value } as unknown as Record<string, unknown>)
             }
@@ -930,7 +1204,7 @@ function NutFormRenderer({
         <div className="sm:col-span-2">
           <label className="block text-[11px] text-slate-400 mb-1">NOTIFYCMD (optional)</label>
           <input
-            value={d.notifycmd}
+            value={d.notifycmd ?? ""}
             onChange={(e) =>
               onChange({ ...d, notifycmd: e.target.value } as unknown as Record<string, unknown>)
             }
@@ -947,7 +1221,7 @@ function NutFormRenderer({
               onChange({
                 ...d,
                 monitors: [
-                  ...d.monitors,
+                  ...monitors,
                   {
                     ups_spec: "ups1@127.0.0.1",
                     power_value: 1,
@@ -965,16 +1239,16 @@ function NutFormRenderer({
           </button>
         </div>
 
-        {d.monitors.map((m, idx) => (
+        {monitors.map((m, idx) => (
           <div
             key={idx}
             className="rounded-xl border border-slate-800 bg-surface-950 p-3 grid grid-cols-1 sm:grid-cols-2 gap-2.5"
           >
             <input
-              value={m.ups_spec}
+              value={m.ups_spec ?? ""}
               placeholder="ups@host"
               onChange={(e) => {
-                const next = [...d.monitors];
+                const next = [...monitors];
                 next[idx] = { ...next[idx], ups_spec: e.target.value };
                 onChange({ ...d, monitors: next } as unknown as Record<string, unknown>);
               }}
@@ -982,10 +1256,10 @@ function NutFormRenderer({
             />
             <div className="flex gap-2">
               <input
-                value={m.username}
+                value={m.username ?? ""}
                 placeholder="username"
                 onChange={(e) => {
-                  const next = [...d.monitors];
+                  const next = [...monitors];
                   next[idx] = { ...next[idx], username: e.target.value };
                   onChange({ ...d, monitors: next } as unknown as Record<string, unknown>);
                 }}
@@ -995,7 +1269,7 @@ function NutFormRenderer({
                 onClick={() =>
                   onChange({
                     ...d,
-                    monitors: d.monitors.filter((_, i) => i !== idx),
+                    monitors: monitors.filter((_, i) => i !== idx),
                   } as unknown as Record<string, unknown>)
                 }
                 className="text-rose-400 px-1"
@@ -1005,19 +1279,19 @@ function NutFormRenderer({
             </div>
             <input
               type="password"
-              value={m.password}
+              value={m.password ?? ""}
               placeholder="password"
               onChange={(e) => {
-                const next = [...d.monitors];
+                const next = [...monitors];
                 next[idx] = { ...next[idx], password: e.target.value };
                 onChange({ ...d, monitors: next } as unknown as Record<string, unknown>);
               }}
               className="rounded bg-surface-900 border border-slate-700 px-2.5 py-1.5 text-xs font-mono text-white"
             />
             <select
-              value={m.role}
+              value={m.role ?? "primary"}
               onChange={(e) => {
-                const next = [...d.monitors];
+                const next = [...monitors];
                 next[idx] = {
                   ...next[idx],
                   role: e.target.value as "primary" | "secondary",

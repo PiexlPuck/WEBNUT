@@ -7,7 +7,9 @@ import secrets
 from fastapi import APIRouter, HTTPException, Request
 
 from app.config import settings
+from app.database import utc_now_iso
 from app.models.schemas import (
+    SECRET_MASK,
     ConnectedNutClient,
     CreateSecondaryUserRequest,
     CreateSecondaryUserResponse,
@@ -20,15 +22,34 @@ from app.models.schemas import (
     NutConfigReadResponse,
     NutConfigSaveRequest,
     NutConfigSaveResponse,
+    NutConnectionConfigRequest,
+    NutConnectionConfigView,
+    NutConnectionTestRequest,
+    NutConnectionTestResponse,
     NutServiceStatus,
     ScannedUsbDevice,
     TelemetrySnapshot,
 )
+from app.nut.client import NutTcpClient
 from app.nut.client_config import detect_local_lan_ip, generate_client_config
 from app.nut.manager import NutConfigApplyError
+from app.nut.parser import parse_nut_conf, parse_ups_conf, parse_upsmon_conf
 from app.nut.scanner import scan_all_hardware, scan_usb_ups
 
 router = APIRouter(prefix="/api/nut", tags=["nut"])
+
+
+async def _get_connection_row(db) -> dict:
+    row = await db.fetch_one("SELECT * FROM nut_connection_config WHERE id = 1")
+    if row is None:
+        return {
+            "mode": "local",
+            "host": settings.nut_host,
+            "port": settings.nut_port,
+            "username": "",
+            "password": "",
+        }
+    return row
 
 
 @router.get("/telemetry", response_model=TelemetrySnapshot)
@@ -110,7 +131,10 @@ async def save_nut_config(
             apply_reload=payload.apply_reload,
         )
         # Push updated service status after config change
-        services = await request.app.state.supervisor.get_services_status()
+        conn_row = await _get_connection_row(request.app.state.db)
+        services = await request.app.state.supervisor.get_services_status(
+            external_mode=(conn_row["mode"] == "external")
+        )
         await request.app.state.ws_hub.broadcast(
             "services", [s.model_dump() for s in services]
         )
@@ -135,7 +159,141 @@ async def save_nut_config(
 
 @router.get("/services", response_model=list[NutServiceStatus])
 async def list_nut_services(request: Request) -> list[NutServiceStatus]:
-    return await request.app.state.supervisor.get_services_status()
+    conn_row = await _get_connection_row(request.app.state.db)
+    return await request.app.state.supervisor.get_services_status(
+        external_mode=(conn_row["mode"] == "external")
+    )
+
+
+@router.get("/connection", response_model=NutConnectionConfigView)
+async def get_nut_connection(request: Request) -> NutConnectionConfigView:
+    row = await _get_connection_row(request.app.state.db)
+    pw = str(row.get("password") or "")
+    return NutConnectionConfigView(
+        mode=row["mode"],
+        host=row["host"],
+        port=int(row["port"]),
+        username=str(row.get("username") or ""),
+        password=SECRET_MASK if pw else "",
+        password_configured=bool(pw),
+    )
+
+
+@router.post("/connection/test", response_model=NutConnectionTestResponse)
+async def test_nut_connection(payload: NutConnectionTestRequest) -> NutConnectionTestResponse:
+    probe = NutTcpClient(host=payload.host.strip(), port=payload.port, timeout=4.0)
+    snap = await probe.fetch_telemetry()
+    if not snap.connected:
+        return NutConnectionTestResponse(
+            ok=False,
+            message=snap.error or f"Failed to connect to {payload.host}:{payload.port}",
+            ups_list=[],
+        )
+    if not snap.ups_list:
+        return NutConnectionTestResponse(
+            ok=True,
+            message=f"Connected to {payload.host}:{payload.port}, but upsd returned 0 UPS units.",
+            ups_list=[],
+        )
+    names = ", ".join(u.name for u in snap.ups_list)
+    return NutConnectionTestResponse(
+        ok=True,
+        message=f"Connected to {payload.host}:{payload.port} — found {len(snap.ups_list)} UPS unit(s): {names}",
+        ups_list=snap.ups_list,
+    )
+
+
+@router.put("/connection", response_model=NutConnectionConfigView)
+async def update_nut_connection(
+    payload: NutConnectionConfigRequest,
+    request: Request,
+) -> NutConnectionConfigView:
+    db = request.app.state.db
+    existing = await _get_connection_row(db)
+    password = (
+        str(existing.get("password") or "")
+        if payload.password == SECRET_MASK
+        else payload.password
+    )
+    target_host = settings.nut_host if payload.mode == "local" else payload.host.strip()
+    target_port = settings.nut_port if payload.mode == "local" else int(payload.port)
+    now = utc_now_iso()
+
+    await db.execute(
+        """
+        INSERT INTO nut_connection_config (id, mode, host, port, username, password, updated_at)
+        VALUES (1, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            mode = excluded.mode,
+            host = excluded.host,
+            port = excluded.port,
+            username = excluded.username,
+            password = excluded.password,
+            updated_at = excluded.updated_at
+        """,
+        (
+            payload.mode,
+            target_host,
+            target_port,
+            payload.username.strip(),
+            password,
+            now,
+        ),
+    )
+
+    nut_client: NutTcpClient = request.app.state.nut_client
+    nut_client.configure(target_host, target_port)
+
+    supervisor = request.app.state.supervisor
+    if payload.mode == "external":
+        await supervisor.stop_service("upsd")
+        await supervisor.stop_service("drivers")
+    else:
+        nut_dir = settings.webnut_nut_dir
+        nut_conf_p = nut_dir / "nut.conf"
+        ups_conf_p = nut_dir / "ups.conf"
+        upsmon_conf_p = nut_dir / "upsmon.conf"
+        nut_mode = (
+            parse_nut_conf(nut_conf_p.read_text(encoding="utf-8", errors="replace")).mode
+            if nut_conf_p.exists()
+            else "netserver"
+        )
+        has_ups = bool(
+            ups_conf_p.exists()
+            and len(parse_ups_conf(ups_conf_p.read_text(encoding="utf-8", errors="replace")).ups_list)
+            > 0
+        )
+        has_mon = bool(
+            upsmon_conf_p.exists()
+            and len(
+                parse_upsmon_conf(
+                    upsmon_conf_p.read_text(encoding="utf-8", errors="replace")
+                ).monitors
+            )
+            > 0
+        )
+        await supervisor.sync_services(nut_mode, has_ups, has_mon)
+
+    # Refresh telemetry and broadcast updated state immediately
+    snapshot = await nut_client.fetch_telemetry()
+    await request.app.state.orchestrator.evaluate_telemetry(snapshot.model_dump())
+
+    services = await supervisor.get_services_status(external_mode=(payload.mode == "external"))
+    await request.app.state.ws_hub.broadcast("services", [s.model_dump() for s in services])
+
+    await request.app.state.event_log.record(
+        "nut_config",
+        "info",
+        "nut_connection_updated",
+        (
+            f"Switched NUT source to external server {target_host}:{target_port}"
+            if payload.mode == "external"
+            else f"Switched NUT source to local built-in server ({target_host}:{target_port})"
+        ),
+        {"mode": payload.mode, "host": target_host, "port": target_port},
+    )
+
+    return await get_nut_connection(request)
 
 
 @router.post("/services/{service}/restart")
@@ -153,7 +311,10 @@ async def restart_nut_service(
         f"Restart {service}: {'succeeded' if ok else 'failed'}",
         {"service": service, "detail": detail},
     )
-    services = await supervisor.get_services_status()
+    conn_row = await _get_connection_row(request.app.state.db)
+    services = await supervisor.get_services_status(
+        external_mode=(conn_row["mode"] == "external")
+    )
     await request.app.state.ws_hub.broadcast("services", [s.model_dump() for s in services])
     if not ok:
         raise HTTPException(status_code=500, detail=detail)
@@ -201,9 +362,21 @@ async def get_nut_clients(request: Request) -> NutClientsOverview:
                 )
             )
 
+    conn_row = await _get_connection_row(db)
+    default_ip = (
+        str(conn_row["host"])
+        if conn_row["mode"] == "external"
+        else detect_local_lan_ip()
+    )
+    default_port = (
+        int(conn_row["port"])
+        if conn_row["mode"] == "external"
+        else settings.nut_port
+    )
+
     return NutClientsOverview(
-        server_ip=detect_local_lan_ip(),
-        nut_port=settings.nut_port,
+        server_ip=default_ip,
+        nut_port=default_port,
         ups_names=ups_names_set,
         available_users=available_users,
         connected_clients=connected_clients,

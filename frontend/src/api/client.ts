@@ -12,6 +12,9 @@ import type {
   NutClientConfigResponse,
   NutClientsOverview,
   NutConfigFile,
+  NutConnectionConfigPayload,
+  NutConnectionConfigView,
+  NutConnectionTestResponse,
   NutServiceStatus,
   OrchestratorConfig,
   OrchestratorState,
@@ -81,6 +84,17 @@ export const api = {
       }
     ),
   getServices: () => request<NutServiceStatus[]>("/api/nut/services"),
+  getNutConnection: () => request<NutConnectionConfigView>("/api/nut/connection"),
+  testNutConnection: (host: string, port = 3493) =>
+    request<NutConnectionTestResponse>("/api/nut/connection/test", {
+      method: "POST",
+      body: JSON.stringify({ host, port }),
+    }),
+  saveNutConnection: (payload: NutConnectionConfigPayload) =>
+    request<NutConnectionConfigView>("/api/nut/connection", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
   restartService: (service: "upsd" | "upsmon" | "drivers") =>
     request<{ service: string; ok: boolean; detail: string }>(
       `/api/nut/services/${service}/restart`,

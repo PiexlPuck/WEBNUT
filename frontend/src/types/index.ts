@@ -130,6 +130,26 @@ export interface NutServiceStatus {
   detail: string;
 }
 
+export type NutConnectionMode = "local" | "external";
+
+export interface NutConnectionConfigPayload {
+  mode: NutConnectionMode;
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+}
+
+export interface NutConnectionConfigView extends NutConnectionConfigPayload {
+  password_configured: boolean;
+}
+
+export interface NutConnectionTestResponse {
+  ok: boolean;
+  message: string;
+  ups_list: UpsTelemetry[];
+}
+
 export interface UpsTelemetry {
   name: string;
   description: string;

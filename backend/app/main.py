@@ -72,9 +72,15 @@ async def lifespan(app: FastAPI):
 
     ws_hub = WebSocketHub()
     event_log = EventLogService(db, ws_hub=ws_hub)
-    supervisor = NutSupervisor(settings.webnut_supervisor_conf)
+    supervisor = NutSupervisor(settings.webnut_supervisor_conf, nut_dir=settings.webnut_nut_dir)
     nut_manager = NutConfigManager(settings.webnut_nut_dir, supervisor, event_log)
-    nut_client = NutTcpClient(host=settings.nut_host, port=settings.nut_port)
+
+    conn_row = await db.fetch_one("SELECT * FROM nut_connection_config WHERE id = 1")
+    is_external = bool(conn_row and conn_row["mode"] == "external")
+    nut_host = str(conn_row["host"]) if is_external and conn_row else settings.nut_host
+    nut_port = int(conn_row["port"]) if is_external and conn_row else settings.nut_port
+
+    nut_client = NutTcpClient(host=nut_host, port=nut_port)
     dispatcher = NotificationDispatcher(db, event_log)
     host_monitor = HostMonitor(db, ws_hub=ws_hub)
     orchestrator = RecoveryOrchestrator(db, nut_client, dispatcher, event_log, ws_hub=ws_hub)
@@ -99,7 +105,8 @@ async def lifespan(app: FastAPI):
     app.state.orchestrator = orchestrator
     app.state.version_checker = version_checker
 
-    await _bootstrap_nut_daemons(settings.webnut_nut_dir, supervisor)
+    if not is_external:
+        await _bootstrap_nut_daemons(settings.webnut_nut_dir, supervisor)
     await orchestrator.reconcile_on_startup()
     host_monitor.start()
     orchestrator.start()
@@ -156,7 +163,10 @@ async def websocket_live(websocket: WebSocket) -> None:
         await websocket.send_json({"type": "orchestrator", "data": orch_state.model_dump()})
         hosts = await db.fetch_all("SELECT * FROM hosts ORDER BY boot_priority ASC, id ASC")
         await websocket.send_json({"type": "hosts", "data": hosts})
-        services = await supervisor.get_services_status()
+        conn_row = await db.fetch_one("SELECT mode FROM nut_connection_config WHERE id = 1")
+        services = await supervisor.get_services_status(
+            external_mode=bool(conn_row and conn_row["mode"] == "external")
+        )
         await websocket.send_json({"type": "services", "data": [s.model_dump() for s in services]})
         version_checker = websocket.app.state.version_checker
         ver_status = await version_checker.get_status()

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Layout, type NavTab } from "./components/Layout";
 import { useLiveTelemetry } from "./hooks/useLiveTelemetry";
 import { DashboardPage } from "./pages/DashboardPage";
@@ -30,38 +31,40 @@ export function App() {
       checkingUpdates={live.checkingUpdates}
       onCheckUpdates={live.checkUpdatesNow}
     >
-      {activeTab === "dashboard" && (
-        <DashboardPage
-          telemetry={live.telemetry}
-          hosts={live.hosts}
-          orchestrator={live.orchestrator}
-          recentEvents={live.recentEvents}
-          onNavigateNut={() => setActiveTab("nut")}
-          onNavigateHosts={() => setActiveTab("hosts")}
-        />
-      )}
-      {activeTab === "hosts" && (
-        <HostsPage
-          hosts={live.hosts}
-          orchestrator={live.orchestrator}
-          telemetry={live.telemetry}
-          onRefresh={live.refreshAll}
-          onOpenNutClientSetup={openNutClientSetup}
-        />
-      )}
-      {activeTab === "clients" && (
-        <NutClientsPage
-          hosts={live.hosts}
-          telemetry={live.telemetry}
-          preselectedHostId={clientSetupHostId}
-          onClearPreselectedHost={() => setClientSetupHostId(null)}
-        />
-      )}
-      {activeTab === "nut" && (
-        <NutConfigPage services={live.services} onRefresh={live.refreshAll} />
-      )}
-      {activeTab === "notifications" && <NotificationsPage />}
-      {activeTab === "events" && <EventsPage />}
+      <ErrorBoundary key={activeTab}>
+        {activeTab === "dashboard" && (
+          <DashboardPage
+            telemetry={live.telemetry}
+            hosts={live.hosts}
+            orchestrator={live.orchestrator}
+            recentEvents={live.recentEvents}
+            onNavigateNut={() => setActiveTab("nut")}
+            onNavigateHosts={() => setActiveTab("hosts")}
+          />
+        )}
+        {activeTab === "hosts" && (
+          <HostsPage
+            hosts={live.hosts}
+            orchestrator={live.orchestrator}
+            telemetry={live.telemetry}
+            onRefresh={live.refreshAll}
+            onOpenNutClientSetup={openNutClientSetup}
+          />
+        )}
+        {activeTab === "clients" && (
+          <NutClientsPage
+            hosts={live.hosts}
+            telemetry={live.telemetry}
+            preselectedHostId={clientSetupHostId}
+            onClearPreselectedHost={() => setClientSetupHostId(null)}
+          />
+        )}
+        {activeTab === "nut" && (
+          <NutConfigPage services={live.services} onRefresh={live.refreshAll} />
+        )}
+        {activeTab === "notifications" && <NotificationsPage />}
+        {activeTab === "events" && <EventsPage />}
+      </ErrorBoundary>
     </Layout>
   );
 }

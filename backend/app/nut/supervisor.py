@@ -3,17 +3,40 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 from pathlib import Path
 
 from app.models.schemas import NutServiceStatus
+from app.nut.parser import parse_nut_conf, parse_ups_conf
+
+
+def _is_pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
 
 
 class NutSupervisor:
     """Executes supervisorctl and upsdrvctl safely without a shell."""
 
-    def __init__(self, supervisor_conf: Path = Path("/etc/supervisord.conf")) -> None:
+    def __init__(
+        self,
+        supervisor_conf: Path = Path("/etc/supervisord.conf"),
+        nut_dir: Path = Path("/etc/nut"),
+        run_dirs: tuple[Path, ...] = (Path("/run/nut"), Path("/var/run/nut")),
+    ) -> None:
         self.supervisor_conf = supervisor_conf
+        self.nut_dir = nut_dir
+        self.run_dirs = run_dirs
 
     async def _run(self, *args: str, timeout: float = 15.0) -> tuple[int, str, str]:
         exe = shutil.which(args[0])
@@ -53,13 +76,94 @@ class NutSupervisor:
             return "error", line
         return "stopped", line
 
-    async def get_services_status(self) -> list[NutServiceStatus]:
+    def _find_driver_pid(self, ups_name: str, driver_name: str) -> int | None:
+        for run_dir in self.run_dirs:
+            if not run_dir.exists():
+                continue
+            exact = run_dir / f"{driver_name}-{ups_name}.pid"
+            candidates = [exact] if exact.is_file() else sorted(run_dir.glob(f"*-{ups_name}.pid"))
+            for pid_file in candidates:
+                try:
+                    pid = int(pid_file.read_text(encoding="utf-8", errors="replace").strip())
+                    if _is_pid_alive(pid):
+                        return pid
+                except (OSError, ValueError):
+                    continue
+        return None
+
+    def _check_drivers_status(self, external_mode: bool = False) -> NutServiceStatus:
+        """Check NUT driver status via config + PID files (compatible with NUT 2.8.0)."""
+        if external_mode:
+            return NutServiceStatus(
+                name="drivers",
+                status="stopped",
+                detail="Unused (connected to external NUT server)",
+            )
+
+        nut_conf_path = self.nut_dir / "nut.conf"
+        ups_conf_path = self.nut_dir / "ups.conf"
+
+        if nut_conf_path.exists():
+            nut_mode = parse_nut_conf(
+                nut_conf_path.read_text(encoding="utf-8", errors="replace")
+            ).mode
+            if nut_mode in ("none", "netclient"):
+                return NutServiceStatus(
+                    name="drivers",
+                    status="stopped",
+                    detail=f"Not used in MODE={nut_mode}",
+                )
+
+        if not ups_conf_path.exists():
+            return NutServiceStatus(
+                name="drivers",
+                status="stopped",
+                detail="No ups.conf found",
+            )
+
+        ups_conf = parse_ups_conf(ups_conf_path.read_text(encoding="utf-8", errors="replace"))
+        if not ups_conf.ups_list:
+            return NutServiceStatus(
+                name="drivers",
+                status="stopped",
+                detail="No local UPS defined in ups.conf",
+            )
+
+        alive_names: list[str] = []
+        missing_names: list[str] = []
+        for ups in ups_conf.ups_list:
+            pid = self._find_driver_pid(ups.name, ups.driver)
+            if pid is not None:
+                alive_names.append(ups.name)
+            else:
+                missing_names.append(ups.name)
+
+        total = len(ups_conf.ups_list)
+        if len(alive_names) == total:
+            return NutServiceStatus(
+                name="drivers",
+                status="running",
+                detail=f"{total}/{total} driver(s) active ({', '.join(alive_names)})",
+            )
+        if not alive_names:
+            return NutServiceStatus(
+                name="drivers",
+                status="stopped",
+                detail=f"Configured driver(s) not started ({', '.join(missing_names)})",
+            )
+        return NutServiceStatus(
+            name="drivers",
+            status="error",
+            detail=f"Missing driver(s): {', '.join(missing_names)}",
+        )
+
+    async def get_services_status(self, external_mode: bool = False) -> list[NutServiceStatus]:
         statuses: list[NutServiceStatus] = []
         if shutil.which("supervisorctl") is None:
             return [
                 NutServiceStatus(name="upsd", status="unavailable", detail="supervisorctl unavailable"),
                 NutServiceStatus(name="upsmon", status="unavailable", detail="supervisorctl unavailable"),
-                NutServiceStatus(name="drivers", status="unavailable", detail="upsdrvctl unavailable"),
+                self._check_drivers_status(external_mode=external_mode),
             ]
 
         for svc in ("upsd", "upsmon"):
@@ -70,18 +174,11 @@ class NutSupervisor:
                 )
             else:
                 mapped, detail = self._map_supervisor_state(out or err)
+                if external_mode and svc == "upsd" and mapped == "stopped":
+                    detail = "Idle (using external NUT server)"
                 statuses.append(NutServiceStatus(name=svc, status=mapped, detail=detail))  # type: ignore[arg-type]
 
-        rc_drv, out_drv, err_drv = await self._run("upsdrvctl", "-D", "status")
-        if rc_drv == 127:
-            statuses.append(NutServiceStatus(name="drivers", status="unavailable", detail=err_drv))
-        elif rc_drv == 0:
-            statuses.append(NutServiceStatus(name="drivers", status="running", detail=out_drv or "Drivers active"))
-        else:
-            detail = err_drv or out_drv or "Drivers stopped"
-            state = "stopped" if "no ups" in detail.lower() or "can't open" in detail.lower() else "error"
-            statuses.append(NutServiceStatus(name="drivers", status=state, detail=detail))  # type: ignore[arg-type]
-
+        statuses.append(self._check_drivers_status(external_mode=external_mode))
         return statuses
 
     async def restart_service(self, service: str) -> tuple[bool, str]:

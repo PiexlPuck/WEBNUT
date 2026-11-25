@@ -48,11 +48,23 @@ It snapshots your current devices, prompts you to plug in the adapter, creates a
 
 ## Updating WEBNUT
 
-WEBNUT automatically checks GitHub for newer releases (and can send a one-time Pushover alert when an update becomes available). To update on your host:
+WEBNUT automatically checks GitHub for newer releases and can send a one-time Pushover alert when an update becomes available. The one-line installer also handles in-place updates (preserving `.env`, `docker-compose.override.yml`, and `./data/*`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PiexlPuck/WEBNUT/main/scripts/install.sh | bash -s -- --update
+```
+
+Or run manually from your WEBNUT directory:
 
 ```bash
 git pull && docker compose up -d --build
 ```
+
+---
+
+## Joining an Existing NUT Server
+
+Already running `upsd` on your host or another machine? Open **NUT Config → NUT Server Source → Join Existing NUT Server**, enter the server IP/hostname and port (`3493`), click **Test Connection**, and click **Save & Connect**. WEBNUT stops its built-in local `upsd`/`drivers` and runs all telemetry, WoL recovery, Pushover alerts, and client configuration directly against your existing NUT server.
 
 ---
 

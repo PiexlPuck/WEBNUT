@@ -15,6 +15,7 @@ from app.api.hosts import router as hosts_router
 from app.api.notifications import router as notifications_router
 from app.api.nut import router as nut_router
 from app.api.orchestrator import router as orchestrator_router
+from app.api.system import router as system_router
 from app.config import settings
 from app.database import Database
 from app.notifications.dispatcher import NotificationDispatcher
@@ -23,6 +24,7 @@ from app.nut.manager import NutConfigManager
 from app.nut.parser import parse_nut_conf, parse_ups_conf, parse_upsmon_conf
 from app.nut.supervisor import NutSupervisor
 from app.services.event_log import EventLogService
+from app.services.version_checker import VersionChecker, read_local_version
 from app.services.ws_hub import WebSocketHub
 from app.wol.monitor import HostMonitor
 from app.wol.orchestrator import RecoveryOrchestrator
@@ -76,6 +78,15 @@ async def lifespan(app: FastAPI):
     dispatcher = NotificationDispatcher(db, event_log)
     host_monitor = HostMonitor(db, ws_hub=ws_hub)
     orchestrator = RecoveryOrchestrator(db, nut_client, dispatcher, event_log, ws_hub=ws_hub)
+    version_checker = VersionChecker(
+        db,
+        dispatcher,
+        event_log,
+        ws_hub=ws_hub,
+        github_repo=settings.webnut_github_repo,
+        check_interval_sec=settings.webnut_update_check_interval_sec,
+        version_file=settings.webnut_version_file,
+    )
 
     app.state.db = db
     app.state.ws_hub = ws_hub
@@ -86,11 +97,13 @@ async def lifespan(app: FastAPI):
     app.state.dispatcher = dispatcher
     app.state.host_monitor = host_monitor
     app.state.orchestrator = orchestrator
+    app.state.version_checker = version_checker
 
     await _bootstrap_nut_daemons(settings.webnut_nut_dir, supervisor)
     await orchestrator.reconcile_on_startup()
     host_monitor.start()
     orchestrator.start()
+    version_checker.start()
 
     await event_log.record(
         "system",
@@ -103,6 +116,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await version_checker.stop()
         await orchestrator.stop()
         await host_monitor.stop()
         await db.close()
@@ -110,7 +124,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="WEBNUT — Unified NUT & WOLNUT Manager",
-    version="1.0.0",
+    version=read_local_version(settings.webnut_version_file),
     lifespan=lifespan,
 )
 
@@ -119,6 +133,7 @@ app.include_router(hosts_router)
 app.include_router(orchestrator_router)
 app.include_router(notifications_router)
 app.include_router(events_router)
+app.include_router(system_router)
 
 
 @app.get("/api/health")
@@ -143,6 +158,9 @@ async def websocket_live(websocket: WebSocket) -> None:
         await websocket.send_json({"type": "hosts", "data": hosts})
         services = await supervisor.get_services_status()
         await websocket.send_json({"type": "services", "data": [s.model_dump() for s in services]})
+        version_checker = websocket.app.state.version_checker
+        ver_status = await version_checker.get_status()
+        await websocket.send_json({"type": "update_status", "data": ver_status.model_dump()})
 
         while True:
             # Keep connection open; ignore client keepalive pings

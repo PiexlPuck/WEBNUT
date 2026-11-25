@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   AlertOctagon,
+  Cable,
   CheckCircle2,
   Cpu,
   Plus,
@@ -8,14 +9,17 @@ import {
   Save,
   Search,
   Trash2,
+  Usb,
 } from "lucide-react";
 import { api, ApiError } from "../api/client";
 import { Modal } from "../components/Modal";
 import type {
+  HardwareScanResponse,
   NutConfData,
   NutConfigFile,
   NutServiceStatus,
   ScannedUsbDevice,
+  SerialDeviceInfo,
   UpsConfData,
   UpsdConfData,
   UpsdUsersData,
@@ -46,11 +50,12 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
     null
   );
 
-  // USB Scanner Modal
+  // Hardware Scanner Modal (USB + Serial + lsusb)
   const [scanOpen, setScanOpen] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
-  const [scannedDevices, setScannedDevices] = useState<ScannedUsbDevice[]>([]);
+  const [scanResult, setScanResult] = useState<HardwareScanResponse | null>(null);
+  const [serialDriverChoices, setSerialDriverChoices] = useState<Record<string, string>>({});
 
   const loadFile = useCallback(async (file: NutConfigFile) => {
     setLoading(true);
@@ -129,22 +134,30 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
     }
   };
 
-  const handleScanUsb = async () => {
+  const handleScanHardware = async () => {
     setScanOpen(true);
     setScanning(true);
     setScanError(null);
-    setScannedDevices([]);
+    setScanResult(null);
     try {
-      const list = await api.scanUsb();
-      setScannedDevices(list);
+      const res = await api.scanHardware();
+      setScanResult(res);
+      const defaults: Record<string, string> = {};
+      for (const sd of res.serial_devices) {
+        const mfrLower = `${sd.manufacturer ?? ""} ${sd.product ?? ""}`.toLowerCase();
+        defaults[sd.path] = mfrLower.includes("apc")
+          ? "apcsmart"
+          : res.serial_drivers[0] || "nutdrv_qx";
+      }
+      setSerialDriverChoices(defaults);
     } catch (err) {
-      setScanError(err instanceof ApiError ? err.message : "USB scan failed");
+      setScanError(err instanceof ApiError ? err.message : "Hardware scan failed");
     } finally {
       setScanning(false);
     }
   };
 
-  const handleAddScannedDevice = async (dev: ScannedUsbDevice) => {
+  const _appendUpsBlock = async (block: UpsConfData["ups_list"][number]) => {
     let targetData = parsedData as UpsConfData | null;
     if (activeFile !== "ups.conf" || !targetData) {
       const loaded = await api.getNutConfig<UpsConfData>("ups.conf");
@@ -152,33 +165,46 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
       setActiveFile("ups.conf");
     }
     const existingNames = new Set(targetData.ups_list.map((u) => u.name));
-    let name = dev.suggested_name;
+    let name = block.name;
     let idx = 2;
     while (existingNames.has(name)) {
-      name = `${dev.suggested_name}_${idx++}`;
+      name = `${block.name}_${idx++}`;
     }
-    const directives = [];
-    if (dev.vendorid) directives.push({ key: "vendorid", value: dev.vendorid });
-    if (dev.productid) directives.push({ key: "productid", value: dev.productid });
-    if (dev.serial) directives.push({ key: "serial", value: dev.serial });
 
     const next: UpsConfData = {
       ...targetData,
-      ups_list: [
-        ...targetData.ups_list,
-        {
-          name,
-          driver: dev.driver,
-          port: dev.port || "auto",
-          desc: [dev.vendor, dev.product].filter(Boolean).join(" ") || "USB UPS",
-          directives,
-        },
-      ],
+      ups_list: [...targetData.ups_list, { ...block, name }],
     };
     setScanOpen(false);
     setParsedData(next as unknown as Record<string, unknown>);
     const prev = await api.previewNutConfig("ups.conf", next);
     setRawPreview(prev.raw);
+  };
+
+  const handleAddScannedDevice = async (dev: ScannedUsbDevice) => {
+    const directives = [];
+    if (dev.vendorid) directives.push({ key: "vendorid", value: dev.vendorid });
+    if (dev.productid) directives.push({ key: "productid", value: dev.productid });
+    if (dev.serial) directives.push({ key: "serial", value: dev.serial });
+
+    await _appendUpsBlock({
+      name: dev.suggested_name,
+      driver: dev.driver,
+      port: dev.port || "auto",
+      desc: [dev.vendor, dev.product].filter(Boolean).join(" ") || "USB UPS",
+      directives,
+    });
+  };
+
+  const handleAddSerialDevice = async (dev: SerialDeviceInfo) => {
+    const driver = serialDriverChoices[dev.path] || "nutdrv_qx";
+    await _appendUpsBlock({
+      name: dev.suggested_name,
+      driver,
+      port: dev.path,
+      desc: [dev.manufacturer, dev.product].filter(Boolean).join(" ") || `Serial UPS (${dev.path})`,
+      directives: [],
+    });
   };
 
   return (
@@ -191,11 +217,11 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
           </p>
         </div>
         <button
-          onClick={handleScanUsb}
+          onClick={handleScanHardware}
           className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm font-medium text-white"
         >
           <Search className="h-4 w-4" />
-          Scan for USB UPS
+          Scan Hardware (USB &amp; Serial)
         </button>
       </div>
 
@@ -328,60 +354,187 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
         </div>
       </div>
 
-      {/* USB Scanner Modal */}
+      {/* Hardware Scanner Modal (USB + Serial + lsusb) */}
       <Modal
         open={scanOpen}
-        title="USB UPS Auto-Discovery (nut-scanner -U)"
+        title="Hardware Discovery (USB, USB-Serial & Raw lsusb)"
         onClose={() => setScanOpen(false)}
+        maxWidth="max-w-3xl"
       >
         {scanning ? (
           <div className="py-10 text-center text-sm text-slate-400">
-            Scanning USB bus for compatible UPS devices...
+            Scanning USB bus, passed-through serial ports, and lsusb devices...
           </div>
         ) : scanError ? (
           <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-300">
             {scanError}
           </div>
-        ) : scannedDevices.length === 0 ? (
-          <div className="py-8 text-center text-sm text-slate-400">
-            No USB UPS devices detected. Verify `/dev/bus/usb` passthrough and USB cable connection.
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {scannedDevices.map((dev, idx) => (
-              <div
-                key={`${dev.driver}-${idx}`}
-                className="rounded-xl border border-slate-700 bg-surface-950 p-4 flex items-center justify-between gap-4"
-              >
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <Cpu className="h-4 w-4 text-indigo-400" />
-                    <span className="font-semibold text-white text-sm">
-                      {dev.product || dev.suggested_name}
-                    </span>
-                    <span className="text-xs font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded">
-                      {dev.driver}
-                    </span>
-                  </div>
-                  <p className="text-xs text-slate-400 font-mono">
-                    {[
-                      dev.vendor,
-                      dev.vendorid && `VID:${dev.vendorid}`,
-                      dev.productid && `PID:${dev.productid}`,
-                      dev.serial && `SN:${dev.serial}`,
-                    ]
-                      .filter(Boolean)
-                      .join(" • ")}
-                  </p>
-                </div>
-                <button
-                  onClick={() => void handleAddScannedDevice(dev)}
-                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white shrink-0"
-                >
-                  Add to ups.conf
-                </button>
+        ) : !scanResult ? null : (
+          <div className="space-y-6">
+            {scanResult.warnings.length > 0 && (
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200 space-y-1">
+                {scanResult.warnings.map((w, i) => (
+                  <div key={i}>{w}</div>
+                ))}
               </div>
-            ))}
+            )}
+
+            {/* Section 1: NUT Auto-Detected USB UPS */}
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                  <Cpu className="h-3.5 w-3.5 text-indigo-400" />
+                  NUT Auto-Detected USB UPS ({scanResult.nut_usb_devices.length})
+                </h4>
+              </div>
+              {scanResult.nut_usb_devices.length === 0 ? (
+                <p className="text-xs text-slate-500 rounded-lg border border-slate-800 bg-surface-950 p-3">
+                  No native USB HID UPS detected by nut-scanner. If using a USB-Serial adapter,
+                  check the Serial Ports section below.
+                </p>
+              ) : (
+                scanResult.nut_usb_devices.map((dev, idx) => (
+                  <div
+                    key={`${dev.driver}-${idx}`}
+                    className="rounded-xl border border-slate-700 bg-surface-950 p-3.5 flex items-center justify-between gap-4"
+                  >
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-white text-sm">
+                          {dev.product || dev.suggested_name}
+                        </span>
+                        <span className="text-xs font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded">
+                          {dev.driver}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400 font-mono">
+                        {[
+                          dev.vendor,
+                          dev.vendorid && `VID:${dev.vendorid}`,
+                          dev.productid && `PID:${dev.productid}`,
+                          dev.serial && `SN:${dev.serial}`,
+                        ]
+                          .filter(Boolean)
+                          .join(" • ")}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => void handleAddScannedDevice(dev)}
+                      className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white shrink-0"
+                    >
+                      Add to ups.conf
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* Section 2: Passed-Through Serial & USB-Serial Ports */}
+            <div className="space-y-2.5">
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                <Cable className="h-3.5 w-3.5 text-sky-400" />
+                Serial &amp; USB-Serial Ports ({scanResult.serial_devices.length})
+              </h4>
+              {scanResult.serial_devices.length === 0 ? (
+                <div className="text-xs text-slate-400 rounded-lg border border-slate-800 bg-surface-950 p-3">
+                  No passed-through serial devices found (`/dev/webnut-ups-*`, `/dev/ttyUSB*`,
+                  `/dev/ttyACM*`). Run <code className="text-indigo-300">./scripts/add-usb-serial.sh</code>{" "}
+                  on your Docker host to attach a USB-Serial adapter.
+                </div>
+              ) : (
+                scanResult.serial_devices.map((sd) => (
+                  <div
+                    key={sd.path}
+                    className="rounded-xl border border-slate-700 bg-surface-950 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                  >
+                    <div className="space-y-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-mono text-sm font-semibold text-white">
+                          {sd.path}
+                        </span>
+                        <span
+                          className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                            sd.accessible
+                              ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                              : "bg-rose-500/15 text-rose-300 border-rose-500/30"
+                          }`}
+                        >
+                          {sd.accessible ? "R/W OK" : "Check Perms"}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400 font-mono truncate">
+                        {[
+                          sd.manufacturer,
+                          sd.product,
+                          sd.vendor_id && sd.product_id && `${sd.vendor_id}:${sd.product_id}`,
+                          sd.serial && `SN:${sd.serial}`,
+                          sd.real_path !== sd.path && `→ ${sd.real_path}`,
+                        ]
+                          .filter(Boolean)
+                          .join(" • ") || "Serial TTY device"}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <select
+                        value={serialDriverChoices[sd.path] || "nutdrv_qx"}
+                        onChange={(e) =>
+                          setSerialDriverChoices((prev) => ({
+                            ...prev,
+                            [sd.path]: e.target.value,
+                          }))
+                        }
+                        className="rounded-lg bg-surface-900 border border-slate-700 px-2.5 py-1.5 text-xs font-mono text-white"
+                      >
+                        {scanResult.serial_drivers.map((drv) => (
+                          <option key={drv} value={drv}>
+                            {drv}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        onClick={() => void handleAddSerialDevice(sd)}
+                        className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white"
+                      >
+                        Add to ups.conf
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* Section 3: All Container USB Devices (lsusb) */}
+            <div className="space-y-2.5">
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                <Usb className="h-3.5 w-3.5 text-emerald-400" />
+                All Container USB Devices — lsusb ({scanResult.raw_usb_devices.length})
+              </h4>
+              {scanResult.raw_usb_devices.length === 0 ? (
+                <p className="text-xs text-slate-500 rounded-lg border border-slate-800 bg-surface-950 p-3">
+                  No raw USB devices returned by `lsusb`.
+                </p>
+              ) : (
+                <div className="rounded-xl border border-slate-800 bg-surface-950 divide-y divide-slate-800/70 max-h-48 overflow-y-auto">
+                  {scanResult.raw_usb_devices.map((u, idx) => (
+                    <div
+                      key={`${u.bus}-${u.device}-${idx}`}
+                      className="px-3.5 py-2 flex items-center justify-between gap-3 text-xs"
+                    >
+                      <span className="text-slate-200 truncate">{u.description}</span>
+                      <span className="font-mono text-slate-400 shrink-0">
+                        Bus {u.bus}:{u.device} • {u.vendor_id}:{u.product_id}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <p className="text-[11px] text-slate-500">
+                Tip: If a USB-Serial chip (FTDI, CH340, Prolific, CP210x) appears in `lsusb` above
+                without a port under Serial Ports, run{" "}
+                <code className="text-slate-300">./scripts/add-usb-serial.sh</code> on your host
+                to pass the TTY node into Docker.
+              </p>
+            </div>
           </div>
         )}
       </Modal>

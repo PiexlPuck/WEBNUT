@@ -132,6 +132,35 @@ class ScannedUsbDevice(BaseModel):
     device: str | None = None
 
 
+class SerialDeviceInfo(BaseModel):
+    path: str
+    real_path: str
+    by_id_path: str | None = None
+    suggested_name: str
+    vendor_id: str | None = None
+    product_id: str | None = None
+    manufacturer: str | None = None
+    product: str | None = None
+    serial: str | None = None
+    accessible: bool = True
+
+
+class RawUsbDevice(BaseModel):
+    bus: str
+    device: str
+    vendor_id: str
+    product_id: str
+    description: str
+
+
+class HardwareScanResponse(BaseModel):
+    nut_usb_devices: list[ScannedUsbDevice] = Field(default_factory=list)
+    serial_devices: list[SerialDeviceInfo] = Field(default_factory=list)
+    raw_usb_devices: list[RawUsbDevice] = Field(default_factory=list)
+    serial_drivers: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class NutServiceStatus(BaseModel):
     name: str
     status: Literal["running", "stopped", "error", "unavailable"]
@@ -392,3 +421,18 @@ class EventLogPage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+# --- System & Version Status ---
+
+class AppVersionStatus(BaseModel):
+    current_version: str
+    latest_version: str | None = None
+    update_available: bool = False
+    release_url: str | None = None
+    release_notes: str | None = None
+    last_checked_at: str | None = None
+    last_error: str | None = None
+    notified_version: str | None = None
+    notified_at: str | None = None
+    github_repo: str = "PiexlPuck/WEBNUT"

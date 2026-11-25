@@ -95,6 +95,35 @@ export interface ScannedUsbDevice {
   device?: string | null;
 }
 
+export interface SerialDeviceInfo {
+  path: string;
+  real_path: string;
+  by_id_path: string | null;
+  suggested_name: string;
+  vendor_id: string | null;
+  product_id: string | null;
+  manufacturer: string | null;
+  product: string | null;
+  serial: string | null;
+  accessible: boolean;
+}
+
+export interface RawUsbDevice {
+  bus: string;
+  device: string;
+  vendor_id: string;
+  product_id: string;
+  description: string;
+}
+
+export interface HardwareScanResponse {
+  nut_usb_devices: ScannedUsbDevice[];
+  serial_devices: SerialDeviceInfo[];
+  raw_usb_devices: RawUsbDevice[];
+  serial_drivers: string[];
+  warnings: string[];
+}
+
 export interface NutServiceStatus {
   name: string;
   status: "running" | "stopped" | "error" | "unavailable";
@@ -303,4 +332,17 @@ export interface NutClientConfigResponse {
   one_liner: string | null;
   gui_fields: GeneratedGuiField[];
   notes: string[];
+}
+
+export interface AppVersionStatus {
+  current_version: string;
+  latest_version: string | null;
+  update_available: boolean;
+  release_url: string | null;
+  release_notes: string | null;
+  last_checked_at: string | null;
+  last_error: string | null;
+  notified_version: string | null;
+  notified_at: string | null;
+  github_repo: string;
 }

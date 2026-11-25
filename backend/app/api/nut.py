@@ -11,6 +11,7 @@ from app.models.schemas import (
     ConnectedNutClient,
     CreateSecondaryUserRequest,
     CreateSecondaryUserResponse,
+    HardwareScanResponse,
     NutClientConfigRequest,
     NutClientConfigResponse,
     NutClientsOverview,
@@ -25,7 +26,7 @@ from app.models.schemas import (
 )
 from app.nut.client_config import detect_local_lan_ip, generate_client_config
 from app.nut.manager import NutConfigApplyError
-from app.nut.scanner import scan_usb_ups
+from app.nut.scanner import scan_all_hardware, scan_usb_ups
 
 router = APIRouter(prefix="/api/nut", tags=["nut"])
 
@@ -51,6 +52,27 @@ async def scan_ups(request: Request) -> list[ScannedUsbDevice]:
         {"count": len(devices)},
     )
     return devices
+
+
+@router.post("/scan-hardware", response_model=HardwareScanResponse)
+async def scan_hardware(request: Request) -> HardwareScanResponse:
+    event_log = request.app.state.event_log
+    result = await scan_all_hardware()
+    await event_log.record(
+        "nut_config",
+        "info",
+        "nut_hardware_scan",
+        (
+            f"Hardware scan found {len(result.nut_usb_devices)} NUT USB, "
+            f"{len(result.serial_devices)} serial, and {len(result.raw_usb_devices)} raw USB device(s)"
+        ),
+        {
+            "nut_usb_count": len(result.nut_usb_devices),
+            "serial_count": len(result.serial_devices),
+            "raw_usb_count": len(result.raw_usb_devices),
+        },
+    )
+    return result
 
 
 @router.get("/config/{filename}", response_model=NutConfigReadResponse)

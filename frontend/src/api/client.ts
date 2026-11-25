@@ -1,7 +1,9 @@
 import type {
+  AppVersionStatus,
   ArpLookupResponse,
   CreateSecondaryUserResponse,
   EventLogPage,
+  HardwareScanResponse,
   HostPayload,
   HostRecord,
   NotificationRuleItem,
@@ -61,6 +63,8 @@ export const api = {
   // NUT
   getTelemetry: () => request<TelemetrySnapshot>("/api/nut/telemetry"),
   scanUsb: () => request<ScannedUsbDevice[]>("/api/nut/scan", { method: "POST" }),
+  scanHardware: () =>
+    request<HardwareScanResponse>("/api/nut/scan-hardware", { method: "POST" }),
   getNutConfig: <T>(file: NutConfigFile) =>
     request<{ filename: NutConfigFile; parsed: T; raw: string }>(`/api/nut/config/${file}`),
   previewNutConfig: (file: NutConfigFile, parsed: unknown) =>
@@ -165,4 +169,9 @@ export const api = {
     return request<EventLogPage>(`/api/events?${qs.toString()}`);
   },
   clearEvents: () => request<{ cleared: number }>("/api/events", { method: "DELETE" }),
+
+  // System / Version
+  getVersionStatus: () => request<AppVersionStatus>("/api/system/version"),
+  checkForUpdates: () =>
+    request<AppVersionStatus>("/api/system/version/check", { method: "POST" }),
 };

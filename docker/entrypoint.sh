@@ -74,6 +74,7 @@ fi
 
 # Enforce strict ownership and permissions required by upsd/upsmon
 if id -u nut >/dev/null 2>&1; then
+  usermod -aG dialout nut 2>/dev/null || true
   chown -R nut:nut "${NUT_DIR}" /run/nut /var/run/nut
 fi
 
@@ -82,6 +83,15 @@ chmod 750 "${NUT_DIR}" "${NUT_DIR}/.backups" /run/nut /var/run/nut
 shopt -s nullglob
 for cfg in "${NUT_DIR}"/*.conf "${NUT_DIR}"/upsd.users; do
   chmod 640 "${cfg}"
+done
+for tty_dev in /dev/webnut-ups-* /dev/ttyUSB* /dev/ttyACM* /dev/serial/by-id/*; do
+  if [ -e "${tty_dev}" ]; then
+    real_tty="$(readlink -f "${tty_dev}" 2>/dev/null || echo "${tty_dev}")"
+    if id -u nut >/dev/null 2>&1; then
+      chgrp nut "${real_tty}" 2>/dev/null || true
+    fi
+    chmod 660 "${real_tty}" 2>/dev/null || true
+  fi
 done
 shopt -u nullglob
 

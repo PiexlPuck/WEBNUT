@@ -1,17 +1,27 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import {
   Activity,
+  ArrowUpCircle,
   Bell,
+  Check,
+  Copy,
   FileText,
   Link2,
   Power,
+  RefreshCw,
   Server,
   Settings2,
   Wifi,
   WifiOff,
+  X,
   Zap,
 } from "lucide-react";
-import type { NutServiceStatus, OrchestratorState, TelemetrySnapshot } from "../types";
+import type {
+  AppVersionStatus,
+  NutServiceStatus,
+  OrchestratorState,
+  TelemetrySnapshot,
+} from "../types";
 
 export type NavTab = "dashboard" | "hosts" | "clients" | "nut" | "notifications" | "events";
 
@@ -22,6 +32,9 @@ interface LayoutProps {
   telemetry: TelemetrySnapshot;
   orchestrator: OrchestratorState;
   services: NutServiceStatus[];
+  versionStatus: AppVersionStatus | null;
+  checkingUpdates: boolean;
+  onCheckUpdates: () => Promise<void>;
   children: ReactNode;
 }
 
@@ -41,8 +54,20 @@ export function Layout({
   telemetry,
   orchestrator,
   services,
+  versionStatus,
+  checkingUpdates,
+  onCheckUpdates,
   children,
 }: LayoutProps) {
+  const [bannerDismissed, setBannerDismissed] = useState(false);
+  const [copiedCmd, setCopiedCmd] = useState(false);
+
+  const updateCmd = "git pull && docker compose up -d --build";
+  const copyUpdateCmd = async () => {
+    await navigator.clipboard.writeText(updateCmd);
+    setCopiedCmd(true);
+    window.setTimeout(() => setCopiedCmd(false), 2000);
+  };
   const primaryUps = telemetry.ups_list[0];
   const upsStatus = primaryUps?.status ?? (telemetry.connected ? "NO UPS" : "DISCONNECTED");
   const isOb = upsStatus.includes("OB");
@@ -137,11 +162,88 @@ export function Layout({
               </div>
             ))}
           </div>
+
+          <div className="pt-2 border-t border-slate-800/60 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-400 font-mono">
+                v{versionStatus?.current_version ?? "1.0.0"}
+              </span>
+              {versionStatus?.update_available && (
+                <span
+                  title={`Update available: v${versionStatus.latest_version}`}
+                  className="h-2 w-2 rounded-full bg-amber-400 animate-pulse"
+                />
+              )}
+            </div>
+            <button
+              onClick={() => {
+                setBannerDismissed(false);
+                void onCheckUpdates();
+              }}
+              disabled={checkingUpdates}
+              title="Check for WEBNUT updates"
+              className="inline-flex items-center gap-1 px-2 py-1 rounded bg-surface-800 hover:bg-surface-700 border border-slate-700/80 text-[11px] text-slate-300 disabled:opacity-50"
+            >
+              <RefreshCw className={`h-3 w-3 ${checkingUpdates ? "animate-spin" : ""}`} />
+              Update
+            </button>
+          </div>
         </div>
       </aside>
 
       {/* Main Content */}
       <main className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
+        {versionStatus?.update_available && !bannerDismissed && (
+          <div className="mb-6 rounded-xl border border-indigo-500/40 bg-indigo-500/10 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <ArrowUpCircle className="h-5 w-5 text-indigo-400 shrink-0 mt-0.5" />
+              <div className="text-xs space-y-1">
+                <div className="text-sm font-semibold text-white">
+                  WEBNUT Update Available: v{versionStatus.latest_version}
+                  <span className="ml-2 text-xs font-normal text-slate-400">
+                    (running v{versionStatus.current_version})
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-slate-300">
+                  <span>Run on host:</span>
+                  <code className="px-2 py-0.5 rounded bg-surface-950 border border-slate-700 font-mono text-[11px] text-indigo-300">
+                    {updateCmd}
+                  </code>
+                  <button
+                    onClick={() => void copyUpdateCmd()}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-surface-800 hover:bg-surface-700 text-[11px] text-slate-200"
+                  >
+                    {copiedCmd ? (
+                      <Check className="h-3 w-3 text-emerald-400" />
+                    ) : (
+                      <Copy className="h-3 w-3" />
+                    )}
+                    {copiedCmd ? "Copied" : "Copy"}
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {versionStatus.release_url && (
+                <a
+                  href={versionStatus.release_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white"
+                >
+                  View on GitHub
+                </a>
+              )}
+              <button
+                onClick={() => setBannerDismissed(true)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-surface-800"
+                title="Dismiss"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        )}
         {children}
       </main>
     </div>

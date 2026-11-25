@@ -7,6 +7,9 @@ data/
 # Environment files
 .env
 
+# Local Docker Compose device passthrough overrides
+docker-compose.override.yml
+
 # Python
 backend/.venv/
 .venv/

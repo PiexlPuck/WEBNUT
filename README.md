@@ -6,6 +6,16 @@ A self-hosted, Docker Compose-first web application that unifies **Network UPS T
 
 ## Quickstart
 
+### Option A: One-Line Interactive Installer (Recommended)
+
+Run on your Linux Docker host—this clones WEBNUT, walks interactively through `.env` creation (`TZ`, `WEB_PORT`, `NUT_PORT`), pauses so you can plug in your USB or USB-Serial UPS adapter, configures Docker passthrough in `docker-compose.override.yml`, and builds/starts the stack:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PiexlPuck/WEBNUT/main/scripts/install.sh | bash
+```
+
+### Option B: Manual Docker Compose Setup
+
 1. Copy `.env.example` to `.env` and adjust `TZ`, `WEB_PORT` (default `8765`), and `NUT_PORT` (default `3493`) if needed:
 
    ```bash
@@ -20,7 +30,29 @@ A self-hosted, Docker Compose-first web application that unifies **Network UPS T
 
 3. Open `http://<host-ip>:8765` in your browser.
    - On first startup, `/etc/nut` (`./data/nut`) is automatically seeded with valid default NUT configs (`nut.conf`, `ups.conf`, `upsd.conf`, `upsd.users`, `upsmon.conf`), random credentials, and `nut:nut` `0640` permissions.
-   - Go to **NUT Config → Scan for USB UPS** to auto-detect your USB UPS and add it to `ups.conf` in one click.
+   - Go to **NUT Config → Scan Hardware (USB & Serial)** to auto-detect USB UPSes, passed-through USB-Serial ports, and all `lsusb` devices in one place.
+
+---
+
+## Adding a USB or USB-Serial UPS Later
+
+If you add a new USB-Serial UPS adapter after initial installation, run the standalone passthrough wizard on your Docker host:
+
+```bash
+./scripts/add-usb-serial.sh
+```
+
+It snapshots your current devices, prompts you to plug in the adapter, creates an optional persistent `udev` symlink (`/dev/webnut-ups-<alias>`), adds the passthrough mapping to `docker-compose.override.yml`, and recreates the container so the new port immediately appears under **NUT Config → Scan Hardware (USB & Serial)**.
+
+---
+
+## Updating WEBNUT
+
+WEBNUT automatically checks GitHub for newer releases (and can send a one-time Pushover alert when an update becomes available). To update on your host:
+
+```bash
+git pull && docker compose up -d --build
+```
 
 ---
 

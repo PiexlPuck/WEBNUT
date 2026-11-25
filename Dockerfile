@@ -41,6 +41,7 @@ COPY backend/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY backend/app /app/app
+COPY VERSION /app/VERSION
 COPY --from=frontend-builder /frontend/dist /app/static
 COPY docker/supervisord.conf /etc/supervisord.conf
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh

@@ -26,6 +26,9 @@ export function App() {
       telemetry={live.telemetry}
       orchestrator={live.orchestrator}
       services={live.services}
+      versionStatus={live.versionStatus}
+      checkingUpdates={live.checkingUpdates}
+      onCheckUpdates={live.checkUpdatesNow}
     >
       {activeTab === "dashboard" && (
         <DashboardPage

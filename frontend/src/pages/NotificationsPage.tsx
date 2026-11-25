@@ -36,6 +36,10 @@ const EVENT_LABELS: Record<string, { label: string; desc: string }> = {
     label: "Host Wake Failed (Exhausted)",
     desc: "All WoL retry attempts exhausted; manual intervention needed",
   },
+  app_update_available: {
+    label: "WEBNUT Update Available",
+    desc: "Sent once when a newer WEBNUT version is published on GitHub",
+  },
 };
 
 const PRIORITIES = [

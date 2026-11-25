@@ -18,6 +18,7 @@ DEFAULT_NOTIFICATION_RULES: list[tuple[str, int, int]] = [
     ("host_wake_succeeded", 1, 0),
     ("host_wake_retrying", 1, 1),
     ("host_wake_failed", 1, 2),
+    ("app_update_available", 1, 0),
 ]
 
 
@@ -209,6 +210,39 @@ class Database:
             )
             await self.conn.execute(
                 "INSERT INTO schema_migrations (version, applied_at) VALUES (2, ?)",
+                (now,),
+            )
+            await self.conn.commit()
+
+        if 3 not in applied:
+            now = utc_now_iso()
+            await self.conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS app_update_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    current_version TEXT NOT NULL DEFAULT '1.0.0',
+                    latest_version TEXT,
+                    release_url TEXT,
+                    release_notes TEXT,
+                    update_available INTEGER NOT NULL DEFAULT 0,
+                    last_checked_at TEXT,
+                    last_error TEXT,
+                    notified_version TEXT,
+                    notified_at TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                """
+            )
+            await self.conn.execute(
+                """
+                INSERT OR IGNORE INTO notification_rules (
+                    event_type, enabled, priority, updated_at
+                ) VALUES ('app_update_available', 1, 0, ?)
+                """,
+                (now,),
+            )
+            await self.conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (3, ?)",
                 (now,),
             )
             await self.conn.commit()

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import type {
+  AppVersionStatus,
   EventLogEntry,
   HostRecord,
   NutServiceStatus,
@@ -29,6 +30,9 @@ export interface LiveState {
   orchestrator: OrchestratorState;
   services: NutServiceStatus[];
   recentEvents: EventLogEntry[];
+  versionStatus: AppVersionStatus | null;
+  checkingUpdates: boolean;
+  checkUpdatesNow: () => Promise<void>;
   refreshAll: () => Promise<void>;
 }
 
@@ -58,22 +62,36 @@ export function useLiveTelemetry(): LiveState {
   const [orchestrator, setOrchestrator] = useState<OrchestratorState>(DEFAULT_ORCHESTRATOR);
   const [services, setServices] = useState<NutServiceStatus[]>([]);
   const [recentEvents, setRecentEvents] = useState<EventLogEntry[]>([]);
+  const [versionStatus, setVersionStatus] = useState<AppVersionStatus | null>(null);
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
   const reconnectTimer = useRef<number | null>(null);
+
+  const checkUpdatesNow = useCallback(async () => {
+    setCheckingUpdates(true);
+    try {
+      const status = await api.checkForUpdates();
+      setVersionStatus(status);
+    } finally {
+      setCheckingUpdates(false);
+    }
+  }, []);
 
   const refreshAll = useCallback(async () => {
     try {
-      const [tel, h, orch, svc, ev] = await Promise.all([
+      const [tel, h, orch, svc, ev, ver] = await Promise.all([
         api.getTelemetry(),
         api.getHosts(),
         api.getOrchestratorStatus(),
         api.getServices(),
         api.getEvents({ limit: 15, offset: 0 }),
+        api.getVersionStatus(),
       ]);
       setTelemetry(tel);
       setHosts(h);
       setOrchestrator(orch);
       setServices(svc);
       setRecentEvents(ev.items);
+      setVersionStatus(ver);
     } catch {
       // Ignore transient hydration failures
     }
@@ -111,6 +129,8 @@ export function useLiveTelemetry(): LiveState {
           } else if (msg.type === "event") {
             const item = msg.data as EventLogEntry;
             setRecentEvents((prev) => [item, ...prev.filter((e) => e.id !== item.id)].slice(0, 25));
+          } else if (msg.type === "update_status") {
+            setVersionStatus(msg.data as AppVersionStatus);
           }
         } catch {
           // Ignore malformed frame
@@ -146,6 +166,9 @@ export function useLiveTelemetry(): LiveState {
     orchestrator,
     services,
     recentEvents,
+    versionStatus,
+    checkingUpdates,
+    checkUpdatesNow,
     refreshAll,
   };
 }

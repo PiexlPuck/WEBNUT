@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     webnut_nut_dir: Path = Path("/etc/nut")
     webnut_static_dir: Path = Path("/app/static")
     webnut_supervisor_conf: Path = Path("/etc/supervisord.conf")
+    webnut_github_repo: str = "PiexlPuck/WEBNUT"
+    webnut_update_check_interval_sec: int = 21600
+    webnut_version_file: Path | None = None
     tz: str = "UTC"
 
     @property

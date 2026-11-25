@@ -12,6 +12,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { api, ApiError } from "../api/client";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Modal } from "../components/Modal";
 import { RecoveryBanner } from "../components/RecoveryBanner";
 import { WakeStateBadge } from "../components/StatusBadge";
@@ -106,6 +107,8 @@ export function HostsPage({
   const [simRunning, setSimRunning] = useState(false);
   const [simError, setSimError] = useState<string | null>(null);
   const [hostTestResult, setHostTestResult] = useState<HostTestRunResponse | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<HostRecord | null>(null);
+  const [deletingHost, setDeletingHost] = useState(false);
 
   // Quick One-Button SSH Deploy Modal
   const [deployHost, setDeployHost] = useState<HostRecord | null>(null);
@@ -271,10 +274,28 @@ export function HostsPage({
     }
   };
 
-  const handleDeleteHost = async (h: HostRecord) => {
-    if (!window.confirm(`Delete host "${h.name}"?`)) return;
-    await api.deleteHost(h.id);
-    await onRefresh();
+  const handleDeleteHost = (h: HostRecord) => {
+    setDeleteTarget(h);
+  };
+
+  const confirmDeleteHost = async () => {
+    if (!deleteTarget) return;
+    const target = deleteTarget;
+    setDeletingHost(true);
+    setFeedback(null);
+    try {
+      await api.deleteHost(target.id);
+      setDeleteTarget(null);
+      await onRefresh();
+    } catch (err) {
+      setFeedback({
+        ok: false,
+        msg: err instanceof ApiError ? err.message : `Failed to delete host "${target.name}"`,
+      });
+      setDeleteTarget(null);
+    } finally {
+      setDeletingHost(false);
+    }
   };
 
   const openBulkTestModal = () => {
@@ -1243,6 +1264,21 @@ export function HostsPage({
           </div>
         </div>
       </Modal>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="Delete Managed Host"
+        message={
+          deleteTarget
+            ? `Delete host "${deleteTarget.name}" (${deleteTarget.ip_or_host})? Its recorded WoL & shutdown policy settings will be removed.`
+            : ""
+        }
+        confirmLabel="Delete Host"
+        variant="danger"
+        busy={deletingHost}
+        onConfirm={confirmDeleteHost}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

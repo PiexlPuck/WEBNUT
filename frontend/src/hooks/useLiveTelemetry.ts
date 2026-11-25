@@ -102,7 +102,7 @@ export function useLiveTelemetry(): LiveState {
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to reach WebNUT backend";
       setVersionStatus((prev) => ({
-        current_version: prev?.current_version ?? "2.2.1",
+        current_version: prev?.current_version ?? "2.2.2",
         latest_version: prev?.latest_version ?? null,
         update_available: prev?.update_available ?? false,
         release_url: prev?.release_url ?? null,

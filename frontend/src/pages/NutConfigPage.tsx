@@ -20,6 +20,7 @@ import {
   Usb,
 } from "lucide-react";
 import { api, ApiError } from "../api/client";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Modal } from "../components/Modal";
 import type {
   HardwareScanResponse,
@@ -131,6 +132,10 @@ export function NutConfigPage({ services, telemetry, onRefresh }: NutConfigPageP
     UpsConfData["global_directives"]
   >([]);
   const [removingUpsName, setRemovingUpsName] = useState<string | null>(null);
+  const [removeUpsTarget, setRemoveUpsTarget] = useState<{
+    name: string;
+    keepScanModalOpen: boolean;
+  } | null>(null);
   const [renameTarget, setRenameTarget] = useState<UpsConfData["ups_list"][number] | null>(null);
   const [renameForm, setRenameForm] = useState({ name: "", desc: "" });
   const [renaming, setRenaming] = useState(false);
@@ -473,8 +478,13 @@ export function NutConfigPage({ services, telemetry, onRefresh }: NutConfigPageP
     }
   };
 
-  const handleRemoveUps = async (upsName: string, keepScanModalOpen = false) => {
-    if (!window.confirm(`Remove UPS '${upsName}' from ups.conf and stop its driver?`)) return;
+  const handleRemoveUps = (upsName: string, keepScanModalOpen = false) => {
+    setRemoveUpsTarget({ name: upsName, keepScanModalOpen });
+  };
+
+  const confirmRemoveUps = async () => {
+    if (!removeUpsTarget) return;
+    const { name: upsName, keepScanModalOpen } = removeUpsTarget;
     setRemovingUpsName(upsName);
     setScanError(null);
     setScanStderr(null);
@@ -493,6 +503,7 @@ export function NutConfigPage({ services, telemetry, onRefresh }: NutConfigPageP
         setLoadedFile("ups.conf");
         setRawPreview(saved.raw);
       }
+      setRemoveUpsTarget(null);
       setFeedback({ ok: true, msg: `Removed UPS '${upsName}' cleanly.` });
       await loadTopState();
       await onRefresh();
@@ -507,6 +518,7 @@ export function NutConfigPage({ services, telemetry, onRefresh }: NutConfigPageP
         msg = d.message || err.message;
         stderr = d.stderr;
       }
+      setRemoveUpsTarget(null);
       setScanError(msg);
       setScanStderr(stderr ?? null);
       setFeedback({ ok: false, msg, stderr });
@@ -1859,6 +1871,21 @@ export function NutConfigPage({ services, telemetry, onRefresh }: NutConfigPageP
           </div>
         </div>
       </Modal>
+
+      <ConfirmDialog
+        open={removeUpsTarget !== null}
+        title="Remove Configured UPS"
+        message={
+          removeUpsTarget
+            ? `Remove UPS '${removeUpsTarget.name}' from ups.conf and stop its NUT driver?`
+            : ""
+        }
+        confirmLabel="Remove UPS"
+        variant="danger"
+        busy={removingUpsName !== null}
+        onConfirm={confirmRemoveUps}
+        onCancel={() => setRemoveUpsTarget(null)}
+      />
     </div>
   );
 }

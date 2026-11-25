@@ -276,6 +276,35 @@ class Database:
             )
             await self.conn.commit()
 
+        if 5 not in applied:
+            now = utc_now_iso()
+            await self.conn.executescript(
+                """
+                ALTER TABLE hosts ADD COLUMN virtual_ups_name TEXT NOT NULL DEFAULT '';
+                ALTER TABLE hosts ADD COLUMN wake_min_battery_charge REAL;
+                ALTER TABLE hosts ADD COLUMN shutdown_mode TEXT NOT NULL DEFAULT 'nut_stream';
+                ALTER TABLE hosts ADD COLUMN shutdown_battery_pct REAL;
+                ALTER TABLE hosts ADD COLUMN shutdown_ob_delay_sec INTEGER;
+                ALTER TABLE hosts ADD COLUMN disconnect_policy TEXT NOT NULL DEFAULT 'inherit';
+                ALTER TABLE hosts ADD COLUMN disconnect_grace_sec INTEGER;
+                ALTER TABLE hosts ADD COLUMN ssh_port INTEGER NOT NULL DEFAULT 22;
+                ALTER TABLE hosts ADD COLUMN ssh_username TEXT NOT NULL DEFAULT '';
+                ALTER TABLE hosts ADD COLUMN ssh_password_enc TEXT NOT NULL DEFAULT '';
+                ALTER TABLE hosts ADD COLUMN ssh_sudo_password_enc TEXT NOT NULL DEFAULT '';
+                ALTER TABLE hosts ADD COLUMN ssh_shutdown_cmd TEXT NOT NULL DEFAULT 'sudo -S shutdown -h now';
+
+                ALTER TABLE orchestrator_config ADD COLUMN disconnect_policy TEXT NOT NULL DEFAULT 'keep_running';
+                ALTER TABLE orchestrator_config ADD COLUMN disconnect_grace_sec INTEGER NOT NULL DEFAULT 600;
+                ALTER TABLE orchestrator_config ADD COLUMN repeater_enabled INTEGER NOT NULL DEFAULT 1;
+                ALTER TABLE orchestrator_config ADD COLUMN repeater_port INTEGER NOT NULL DEFAULT 3493;
+                """
+            )
+            await self.conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (5, ?)",
+                (now,),
+            )
+            await self.conn.commit()
+
     async def fetch_one(self, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
         cur = await self.conn.execute(sql, params)
         row = await cur.fetchone()
@@ -290,3 +319,19 @@ class Database:
         cur = await self.conn.execute(sql, params)
         await self.conn.commit()
         return cur.lastrowid or 0
+
+
+def sanitize_host_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Strip encrypted SSH secret columns before broadcasting host rows over WebSocket."""
+    cleaned = dict(row)
+    pw_enc = str(cleaned.pop("ssh_password_enc", "") or "")
+    sudo_enc = str(cleaned.pop("ssh_sudo_password_enc", "") or "")
+    cleaned["ssh_password_configured"] = bool(pw_enc)
+    cleaned["ssh_password"] = "********" if pw_enc else ""
+    cleaned["ssh_sudo_password"] = "********" if sudo_enc else ""
+    return cleaned
+
+
+async def fetch_public_hosts(db: Database) -> list[dict[str, Any]]:
+    rows = await db.fetch_all("SELECT * FROM hosts ORDER BY boot_priority ASC, id ASC")
+    return [sanitize_host_row(r) for r in rows]

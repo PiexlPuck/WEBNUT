@@ -39,12 +39,12 @@ interface LayoutProps {
 }
 
 const NAV_ITEMS: { id: NavTab; label: string; icon: typeof Activity }[] = [
-  { id: "dashboard", label: "Dashboard", icon: Activity },
-  { id: "hosts", label: "Hosts & Recovery", icon: Server },
-  { id: "clients", label: "NUT Clients", icon: Link2 },
-  { id: "nut", label: "NUT Config", icon: Settings2 },
-  { id: "notifications", label: "Notifications", icon: Bell },
-  { id: "events", label: "Event Log", icon: FileText },
+  { id: "dashboard", label: "Overview", icon: Activity },
+  { id: "nut", label: "UPS Setup", icon: Settings2 },
+  { id: "hosts", label: "Managed Hosts", icon: Server },
+  { id: "clients", label: "Client Setup", icon: Link2 },
+  { id: "notifications", label: "Alerts", icon: Bell },
+  { id: "events", label: "Activity Log", icon: FileText },
 ];
 
 export function Layout({
@@ -92,8 +92,8 @@ export function Layout({
               <Zap className="h-5 w-5" />
             </div>
             <div>
-              <h1 className="text-base font-bold tracking-tight text-white">WEBNUT</h1>
-              <p className="text-[11px] text-slate-400">NUT &amp; WOLNUT Manager</p>
+              <h1 className="text-base font-bold tracking-tight text-white">WebNUT</h1>
+              <p className="text-[11px] text-slate-400">UPS &amp; Power Orchestrator</p>
             </div>
           </div>
           <span

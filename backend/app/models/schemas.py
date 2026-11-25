@@ -161,6 +161,55 @@ class HardwareScanResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class SnmpScanRequest(BaseModel):
+    start_ip: str = Field(min_length=1, max_length=64)
+    end_ip: str = Field(min_length=1, max_length=64)
+    community: str = Field(default="public", max_length=64)
+    snmp_version: Literal["v1", "v2c", "v3"] = "v2c"
+
+
+class ScannedSnmpDevice(BaseModel):
+    suggested_name: str
+    driver: str = "snmp-ups"
+    port: str
+    mibs: str = "auto"
+    community: str = "public"
+    snmp_version: str = "v2c"
+    desc: str = ""
+
+
+class SnmpUpsSetupRequest(BaseModel):
+    name: str = Field(default="snmp_ups", min_length=1, max_length=64)
+    host: str = Field(min_length=1, max_length=255)
+    snmp_version: Literal["v1", "v2c", "v3"] = "v2c"
+    mibs: str = Field(default="auto", min_length=1, max_length=64)
+    community: str = Field(default="public", max_length=128)
+    sec_level: Literal["noAuthNoPriv", "authNoPriv", "authPriv"] = "authPriv"
+    sec_name: str = Field(default="", max_length=128)
+    auth_protocol: Literal["MD5", "SHA", "SHA256"] = "SHA"
+    auth_password: str = Field(default="", max_length=128)
+    priv_protocol: Literal["DES", "AES"] = "AES"
+    priv_password: str = Field(default="", max_length=128)
+    desc: str = Field(default="SNMP Network UPS", max_length=256)
+    pollfreq: int = Field(default=15, ge=2, le=300)
+
+
+class RepeaterClientSession(BaseModel):
+    ups_name: str
+    client_ip: str
+    username: str = ""
+    connected_at: str
+
+
+class RepeaterStatusResponse(BaseModel):
+    running: bool
+    port: int
+    error: str | None = None
+    mirrored_ups_count: int = 0
+    virtual_ups_count: int = 0
+    connected_clients: list[RepeaterClientSession] = Field(default_factory=list)
+
+
 class NutServiceStatus(BaseModel):
     name: str
     status: Literal["running", "stopped", "error", "unavailable"]
@@ -250,6 +299,18 @@ class HostBase(BaseModel):
     nut_client_platform: NutClientPlatform = "linux_debian"
     nut_ups_name: str = Field(default="", max_length=64)
     nut_client_user: str = Field(default="", max_length=64)
+    virtual_ups_name: str = Field(default="", max_length=64)
+    wake_min_battery_charge: float | None = Field(default=None, ge=0.0, le=100.0)
+    shutdown_mode: Literal["nut_stream", "ssh", "both", "disabled"] = "nut_stream"
+    shutdown_battery_pct: float | None = Field(default=None, ge=0.0, le=100.0)
+    shutdown_ob_delay_sec: int | None = Field(default=None, ge=0, le=86400)
+    disconnect_policy: Literal["inherit", "keep_running", "shutdown_after_grace"] = "inherit"
+    disconnect_grace_sec: int | None = Field(default=None, ge=0, le=86400)
+    ssh_port: int = Field(default=22, ge=1, le=65535)
+    ssh_username: str = Field(default="", max_length=64)
+    ssh_password: str = Field(default="", max_length=256)
+    ssh_sudo_password: str = Field(default="", max_length=256)
+    ssh_shutdown_cmd: str = Field(default="sudo -S shutdown -h now", max_length=256)
 
     @field_validator("subnet_broadcast")
     @classmethod
@@ -269,12 +330,14 @@ class HostUpdate(HostBase):
 
 class HostRecord(HostBase):
     id: int
+    ssh_password_configured: bool = False
     is_online: bool
     last_seen_at: str | None = None
     was_online_before_outage: bool
     wake_state: Literal[
         "IDLE",
         "WAITING_STAGGER",
+        "WAITING_BATTERY",
         "WAKING",
         "RETRYING",
         "WAKE_SUCCEEDED",
@@ -284,6 +347,33 @@ class HostRecord(HostBase):
     last_wake_error: str | None = None
     created_at: str
     updated_at: str
+
+
+class SshTestRequest(BaseModel):
+    ssh_port: int = Field(default=22, ge=1, le=65535)
+    ssh_username: str = Field(min_length=1, max_length=64)
+    ssh_password: str = Field(default="", max_length=256)
+
+
+class SshDeployRequest(BaseModel):
+    ssh_port: int = Field(default=22, ge=1, le=65535)
+    ssh_username: str = Field(min_length=1, max_length=64)
+    ssh_password: str = Field(default="", max_length=256)
+    ssh_sudo_password: str = Field(default="", max_length=256)
+    save_credentials: bool = False
+    nut_username: str = Field(default="monuser", min_length=1, max_length=64)
+    nut_password: str = Field(default="", max_length=256)
+    final_delay: int = Field(default=5, ge=0, le=600)
+    shutdown_cmd: str = Field(default="/sbin/shutdown -h +0", max_length=256)
+
+
+class SshDeployResponse(BaseModel):
+    ok: bool
+    steps: list[str] = Field(default_factory=list)
+    error: str | None = None
+    virtual_ups_name: str = ""
+    server_host: str = ""
+    nut_port: int = 3493
 
 
 class ArpLookupRequest(BaseModel):
@@ -373,6 +463,10 @@ class OrchestratorConfigModel(BaseModel):
     host_poll_interval_sec: int = Field(default=30, ge=5, le=3600)
     ups_poll_interval_sec: int = Field(default=5, ge=1, le=300)
     auto_recovery_enabled: bool = True
+    disconnect_policy: Literal["keep_running", "shutdown_after_grace"] = "keep_running"
+    disconnect_grace_sec: int = Field(default=600, ge=0, le=86400)
+    repeater_enabled: bool = True
+    repeater_port: int = Field(default=3493, ge=1, le=65535)
 
 
 class OrchestratorStateModel(BaseModel):
@@ -381,6 +475,8 @@ class OrchestratorStateModel(BaseModel):
     outage_started_at: str | None = None
     stabilizing_started_at: str | None = None
     recovery_started_at: str | None = None
+    disconnect_started_at: str | None = None
+    disconnect_elapsed_sec: int = 0
     snapshot_frozen: bool
     is_dry_run: bool
     stability_remaining_sec: int = 0

@@ -4,6 +4,7 @@ set -euo pipefail
 NUT_DIR="${WEBNUT_NUT_DIR:-/etc/nut}"
 DATA_DIR="${WEBNUT_DATA_DIR:-/app/data}"
 NUT_PORT="${NUT_PORT:-3493}"
+INTERNAL_NUT_PORT="${WEBNUT_INTERNAL_NUT_PORT:-3494}"
 
 mkdir -p "${DATA_DIR}" "${NUT_DIR}" "${NUT_DIR}/.backups" /run/nut /var/run/nut
 
@@ -25,8 +26,8 @@ fi
 
 if [ ! -f "${NUT_DIR}/upsd.conf" ]; then
   cat > "${NUT_DIR}/upsd.conf" << EOF
-# Managed by WEBNUT
-LISTEN 0.0.0.0 ${NUT_PORT}
+# Managed by WEBNUT (internal upsd backend; LAN clients connect to WebNUT Repeater on ${NUT_PORT})
+LISTEN 127.0.0.1 ${INTERNAL_NUT_PORT}
 EOF
 fi
 

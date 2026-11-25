@@ -20,7 +20,12 @@ import type {
   OrchestratorState,
   PushoverConfigPayload,
   PushoverConfigView,
+  RepeaterStatusResponse,
+  ScannedSnmpDevice,
   ScannedUsbDevice,
+  SnmpUpsSetupPayload,
+  SshDeployRequest,
+  SshDeployResponse,
   TelemetrySnapshot,
 } from "../types";
 
@@ -68,6 +73,25 @@ export const api = {
   scanUsb: () => request<ScannedUsbDevice[]>("/api/nut/scan", { method: "POST" }),
   scanHardware: () =>
     request<HardwareScanResponse>("/api/nut/scan-hardware", { method: "POST" }),
+  scanSnmp: (payload: {
+    start_ip: string;
+    end_ip: string;
+    community: string;
+    snmp_version: "v1" | "v2c" | "v3";
+  }) =>
+    request<ScannedSnmpDevice[]>("/api/nut/scan-snmp", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  setupSnmpUps: (payload: SnmpUpsSetupPayload) =>
+    request<{ ok: boolean; applied: boolean; message: string; raw: string }>(
+      "/api/nut/setup/snmp",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }
+    ),
+  getRepeaterStatus: () => request<RepeaterStatusResponse>("/api/nut/repeater"),
   getNutConfig: <T>(file: NutConfigFile) =>
     request<{ filename: NutConfigFile; parsed: T; raw: string }>(`/api/nut/config/${file}`),
   previewNutConfig: (file: NutConfigFile, parsed: unknown) =>
@@ -129,6 +153,19 @@ export const api = {
     request<{ started: boolean; host_id: number }>(`/api/hosts/${id}/wake`, {
       method: "POST",
       body: JSON.stringify({ track_retries: trackRetries }),
+    }),
+  testHostSsh: (
+    id: number,
+    payload: { ssh_port: number; ssh_username: string; ssh_password: string }
+  ) =>
+    request<{ ok: boolean; detail: string }>(`/api/hosts/${id}/test-ssh`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  deployHostClient: (id: number, payload: SshDeployRequest) =>
+    request<SshDeployResponse>(`/api/hosts/${id}/deploy-client`, {
+      method: "POST",
+      body: JSON.stringify(payload),
     }),
 
   // Orchestrator

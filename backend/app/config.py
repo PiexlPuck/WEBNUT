@@ -11,6 +11,7 @@ class Settings(BaseSettings):
 
     web_port: int = 8765
     nut_port: int = 3493
+    webnut_internal_nut_port: int = 3494
     nut_host: str = "127.0.0.1"
     webnut_data_dir: Path = Path("/app/data")
     webnut_nut_dir: Path = Path("/etc/nut")

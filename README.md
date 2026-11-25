@@ -1,6 +1,6 @@
-# WEBNUT — Unified NUT & WOLNUT Web Manager
+# WebNUT — UPS & Power Orchestrator (v2.0.0)
 
-A self-hosted, Docker Compose-first web application that unifies **Network UPS Tools (NUT)** server/client configuration and live telemetry with **WOLNUT-style Wake-on-LAN (WoL) recovery orchestration**, an **automatic retry-on-failure verification loop**, and **Pushover notifications**—all managed through a single dark-mode Web UI with zero CLI editing required.
+A self-hosted, Docker Compose-first power orchestration platform uniting **USB / Serial / SNMP / External NUT UPS setup**, a **Built-in Smart NUT Repeater**, **One-Button SSH/SFTP remote client deployment**, **per-host shutdown & staged Wake-on-LAN (WoL) recovery thresholds**, **UPS disconnection grace policies**, and **Pushover alerts**—all managed through a single dark-mode Web UI with zero CLI editing required.
 
 ---
 
@@ -62,9 +62,20 @@ git pull && docker compose up -d --build
 
 ---
 
-## Joining an Existing NUT Server
+## What's New in v2.0.0
 
-Already running `upsd` on your host or another machine? Open **NUT Config → NUT Server Source → Join Existing NUT Server**, enter the server IP/hostname and port (`3493`), click **Test Connection**, and click **Save & Connect**. WEBNUT stops its built-in local `upsd`/`drivers` and runs all telemetry, WoL recovery, Pushover alerts, and client configuration directly against your existing NUT server.
+- **Built-in Smart NUT Repeater (`0.0.0.0:3493`)**: Every remote client (`upsmon` / Proxmox / NAS / TrueNAS) points at WebNUT—whether your UPS is attached via local USB, Serial, SNMP, or an existing external NUT server. WebNUT exposes mirrored UPS streams plus per-host virtual UPS streams (e.g. `proxmox_1@<webnut-ip>`) so per-host shutdown battery `%`, on-battery delay, and disconnect grace policies apply live from the Web UI without editing client files.
+- **One-Button SSH/SFTP Client Setup**: Enter the target host IP, SSH username/password (with optional encrypted storage in SQLite via Fernet), and click **Deploy Client via SSH**. WebNUT installs `nut-client`, uploads `nut.conf` and `upsmon.conf` pointing at WebNUT's Repeater, sets permissions, and enables `nut-monitor`.
+- **Per-Host Shutdown & Staged Battery WoL Recovery**: Set per-host wake battery `%` (e.g. wake `Proxmox 1` at `10% OL` and `Proxmox 2` at `50% OL`), per-host shutdown battery `%`, on-battery delay, and optional SSH shutdown fallback (`nut_stream`, `ssh`, `both`, or `disabled`).
+- **UPS Disconnection Grace Policy**: Choose globally (and override per host) whether to keep services running indefinitely on UPS comms loss (`keep_running`) or trigger shutdown after a configurable grace window (`shutdown_after_grace`, e.g. `10 minutes` / `600s`).
+- **One-Page UPS Setup + SNMP Support**: Unified setup for USB, USB-Serial, SNMP (`v1`/`v2c`/`v3`, `nut-scanner -S` subnet discovery, MIB selection), and External NUT Server, with the raw 5-file editor cleanly tucked into a collapsible Advanced drawer.
+- **Clearer UI & Branding**: Refreshed **WebNUT — UPS & Power Orchestrator** branding, custom battery-bolt SVG favicon, and intuitive sidebar navigation (`Overview`, `UPS Setup`, `Managed Hosts`, `Client Setup`, `Alerts`, `Activity Log`).
+
+---
+
+## Joining an Existing NUT Server (Smart Repeater Mode)
+
+Already running `upsd` on a Synology, QNAP, Raspberry Pi, or another host? Open **UPS Setup → External NUT Repeater**, enter the upstream server IP/hostname and port (`3493`), click **Test Connection**, and click **Save & Connect**. WebNUT stops its local internal `upsd` (`127.0.0.1:3494`) and repeats all telemetry through WebNUT's **Smart NUT Repeater** on port `3493`—giving your LAN clients unified monitoring, per-host shutdown streaming, staged WoL recovery, and disconnect grace control.
 
 ---
 
@@ -73,12 +84,13 @@ Already running `upsd` on your host or another machine? Open **NUT Config → NU
 Everything runs inside a single container managed by `supervisord` (`network_mode: host`):
 
 - **`webnut` (FastAPI + Uvicorn + Compiled React UI)** on `WEB_PORT` (`8765`):
-  - Serves the REST API (`/api/*`), live WebSocket (`/ws/live`), and static frontend bundle.
-  - Polls `upsd` directly over the NUT TCP protocol (`127.0.0.1:NUT_PORT`).
+  - Serves the REST API (`/api/*`), live WebSocket (`/ws/live`), custom SVG favicon (`/favicon.svg`), and static frontend bundle.
+  - Runs the **Smart NUT Repeater (`0.0.0.0:NUT_PORT`, default `3493`)** exposing mirrored upstream UPSes and per-host virtual UPS streams (`host_name@webnut`).
+  - Connects to either local `upsd` (`127.0.0.1:WEBNUT_INTERNAL_NUT_PORT`, default `3494`) or an external upstream NUT server.
   - Atomically writes `/etc/nut/*` with timestamped backups (`.backups/`) and automatically rolls back if `upsdrvctl` / `upsd` / `upsmon` fails to start.
-  - Persists managed hosts, pre-outage snapshots, recovery state, Pushover config, and audit logs in `/app/data/app.db` (SQLite).
-- **`upsd` & UPS Drivers (`upsdrvctl`)**: Started and reloaded safely via `supervisorctl` / `upsdrvctl` without mounting `/var/run/docker.sock`.
-- **`upsmon`**: Monitors configured `MONITOR` entries in `upsmon.conf`.
+  - Persists managed hosts, encrypted SSH credentials (Fernet key at `/app/data/.secret.key`), pre-outage snapshots, recovery state, Pushover config, and audit logs in `/app/data/app.db` (SQLite).
+- **`upsd` & UPS Drivers (`upsdrvctl` / `snmp-ups`)**: Started and reloaded safely via `supervisorctl` / `upsdrvctl` without mounting `/var/run/docker.sock`.
+- **`upsmon`**: Local monitor running inside the container against configured `upsmon.conf`.
 
 ---
 
@@ -88,7 +100,8 @@ Everything runs inside a single container managed by `supervisord` (`network_mod
 |---|---|---|
 | `TZ` | `UTC` | Container timezone |
 | `WEB_PORT` | `8765` | Web UI & API port |
-| `NUT_PORT` | `3493` | NUT `upsd` listen/query port |
+| `NUT_PORT` | `3493` | Public WebNUT Smart Repeater listen port for LAN clients |
+| `WEBNUT_INTERNAL_NUT_PORT` | `3494` | Internal local `upsd` listen port (loopback only) |
 
 | Host Path | Container Path | Purpose |
 |---|---|---|

@@ -10,9 +10,23 @@ from pathlib import Path
 from app.models.schemas import (
     HardwareScanResponse,
     RawUsbDevice,
+    ScannedSnmpDevice,
     ScannedUsbDevice,
     SerialDeviceInfo,
 )
+
+COMMON_SNMP_MIBS: list[str] = [
+    "auto",
+    "apcc",
+    "ietf",
+    "pw",
+    "cyberpower",
+    "eaton_ats",
+    "raritan",
+    "tripplite",
+    "bestpower",
+    "netvision",
+]
 
 COMMON_SERIAL_DRIVERS: list[str] = [
     "nutdrv_qx",
@@ -303,3 +317,89 @@ async def scan_all_hardware() -> HardwareScanResponse:
         serial_drivers=list(COMMON_SERIAL_DRIVERS),
         warnings=warnings,
     )
+
+
+def parse_snmp_scanner_output(stdout: str) -> list[ScannedSnmpDevice]:
+    """Parse INI-style blocks emitted by `nut-scanner -S`."""
+    devices: list[ScannedSnmpDevice] = []
+    current: dict[str, str] | None = None
+
+    def flush() -> None:
+        if not current:
+            return
+        port = current.get("port", "").strip()
+        if not port:
+            return
+        idx = len(devices) + 1
+        desc = current.get("desc") or ""
+        devices.append(
+            ScannedSnmpDevice(
+                suggested_name=_slugify_ups_name(f"snmp_{port.replace('.', '_')}", idx),
+                driver=current.get("driver", "snmp-ups") or "snmp-ups",
+                port=port,
+                mibs=current.get("mibs") or "auto",
+                community=current.get("community") or "public",
+                snmp_version=current.get("snmp_version") or "v2c",
+                desc=desc,
+            )
+        )
+
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith(";"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            flush()
+            current = {}
+            continue
+        if current is not None and "=" in line:
+            k, v = line.split("=", 1)
+            current[k.strip().lower()] = v.strip().strip('"').strip("'")
+
+    flush()
+    return devices
+
+
+async def scan_snmp_ups(
+    start_ip: str,
+    end_ip: str,
+    community: str = "public",
+    snmp_version: str = "v2c",
+    timeout: float = 25.0,
+) -> list[ScannedSnmpDevice]:
+    """Run `nut-scanner -S` safely without a shell to discover SNMP UPS units."""
+    args = [
+        "nut-scanner",
+        "-S",
+        "-s",
+        start_ip.strip(),
+        "-e",
+        end_ip.strip(),
+        "-c",
+        community.strip() or "public",
+    ]
+    if snmp_version in ("v1", "v2c", "v3"):
+        args.extend(["-v", snmp_version.lstrip("v")])
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("nut-scanner binary not found.") from exc
+
+    try:
+        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError(f"SNMP scan timed out after {timeout:.0f}s") from exc
+
+    stdout = stdout_b.decode("utf-8", errors="replace")
+    stderr = stderr_b.decode("utf-8", errors="replace").strip()
+    devices = parse_snmp_scanner_output(stdout)
+    if proc.returncode != 0 and not devices:
+        raise RuntimeError(stderr or f"nut-scanner -S exited with code {proc.returncode}")
+    return devices

@@ -32,6 +32,10 @@ export function WakeStateBadge({
       label: "Waiting Stagger",
       cls: "bg-indigo-500/15 text-indigo-300 border-indigo-500/40",
     },
+    WAITING_BATTERY: {
+      label: "Waiting Battery",
+      cls: "bg-cyan-500/15 text-cyan-300 border-cyan-500/40",
+    },
     WAKING: {
       label: `Waking (${attempt}/${maxRetries})`,
       cls: "bg-sky-500/15 text-sky-300 border-sky-500/40",

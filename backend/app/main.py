@@ -17,12 +17,14 @@ from app.api.nut import router as nut_router
 from app.api.orchestrator import router as orchestrator_router
 from app.api.system import router as system_router
 from app.config import settings
-from app.database import Database
+from app.database import Database, fetch_public_hosts
 from app.notifications.dispatcher import NotificationDispatcher
 from app.nut.client import NutTcpClient
 from app.nut.manager import NutConfigManager
-from app.nut.parser import parse_nut_conf, parse_ups_conf, parse_upsmon_conf
+from app.nut.parser import parse_nut_conf, parse_ups_conf, parse_upsd_conf, parse_upsmon_conf
+from app.nut.repeater import NutRepeaterServer
 from app.nut.supervisor import NutSupervisor
+from app.services.crypto import SecretBox
 from app.services.event_log import EventLogService
 from app.services.version_checker import VersionChecker, read_local_version
 from app.services.ws_hub import WebSocketHub
@@ -72,18 +74,37 @@ async def lifespan(app: FastAPI):
 
     ws_hub = WebSocketHub()
     event_log = EventLogService(db, ws_hub=ws_hub)
+    secret_box = SecretBox(settings.webnut_data_dir)
     supervisor = NutSupervisor(settings.webnut_supervisor_conf, nut_dir=settings.webnut_nut_dir)
     nut_manager = NutConfigManager(settings.webnut_nut_dir, supervisor, event_log)
 
     conn_row = await db.fetch_one("SELECT * FROM nut_connection_config WHERE id = 1")
     is_external = bool(conn_row and conn_row["mode"] == "external")
-    nut_host = str(conn_row["host"]) if is_external and conn_row else settings.nut_host
-    nut_port = int(conn_row["port"]) if is_external and conn_row else settings.nut_port
+    if is_external and conn_row:
+        nut_host = str(conn_row["host"])
+        nut_port = int(conn_row["port"])
+    else:
+        nut_host = settings.nut_host
+        nut_port = settings.webnut_internal_nut_port
+        upsd_p = settings.webnut_nut_dir / "upsd.conf"
+        if upsd_p.exists():
+            upsd_cfg = parse_upsd_conf(upsd_p.read_text(encoding="utf-8", errors="replace"))
+            if upsd_cfg.listens:
+                nut_port = int(upsd_cfg.listens[0].port)
 
     nut_client = NutTcpClient(host=nut_host, port=nut_port)
     dispatcher = NotificationDispatcher(db, event_log)
+    repeater = NutRepeaterServer(bind_host="0.0.0.0", port=settings.nut_port)
     host_monitor = HostMonitor(db, ws_hub=ws_hub)
-    orchestrator = RecoveryOrchestrator(db, nut_client, dispatcher, event_log, ws_hub=ws_hub)
+    orchestrator = RecoveryOrchestrator(
+        db,
+        nut_client,
+        dispatcher,
+        event_log,
+        ws_hub=ws_hub,
+        repeater=repeater,
+        secret_box=secret_box,
+    )
     version_checker = VersionChecker(
         db,
         dispatcher,
@@ -97,10 +118,12 @@ async def lifespan(app: FastAPI):
     app.state.db = db
     app.state.ws_hub = ws_hub
     app.state.event_log = event_log
+    app.state.secret_box = secret_box
     app.state.supervisor = supervisor
     app.state.nut_manager = nut_manager
     app.state.nut_client = nut_client
     app.state.dispatcher = dispatcher
+    app.state.repeater = repeater
     app.state.host_monitor = host_monitor
     app.state.orchestrator = orchestrator
     app.state.version_checker = version_checker
@@ -108,6 +131,9 @@ async def lifespan(app: FastAPI):
     if not is_external:
         await _bootstrap_nut_daemons(settings.webnut_nut_dir, supervisor)
     await orchestrator.reconcile_on_startup()
+    orch_cfg = await orchestrator.get_config()
+    if orch_cfg.repeater_enabled:
+        await repeater.start(orch_cfg.repeater_port)
     host_monitor.start()
     orchestrator.start()
     version_checker.start()
@@ -116,8 +142,8 @@ async def lifespan(app: FastAPI):
         "system",
         "info",
         "app_started",
-        "WEBNUT server started",
-        {"web_port": settings.web_port, "nut_port": settings.nut_port},
+        "WebNUT server started",
+        {"web_port": settings.web_port, "nut_port": settings.nut_port, "repeater_port": repeater.port},
     )
 
     try:
@@ -126,6 +152,7 @@ async def lifespan(app: FastAPI):
         await version_checker.stop()
         await orchestrator.stop()
         await host_monitor.stop()
+        await repeater.stop()
         await db.close()
 
 
@@ -161,7 +188,7 @@ async def websocket_live(websocket: WebSocket) -> None:
         await websocket.send_json({"type": "telemetry", "data": orchestrator.latest_telemetry})
         orch_state = await orchestrator.get_state()
         await websocket.send_json({"type": "orchestrator", "data": orch_state.model_dump()})
-        hosts = await db.fetch_all("SELECT * FROM hosts ORDER BY boot_priority ASC, id ASC")
+        hosts = await fetch_public_hosts(db)
         await websocket.send_json({"type": "hosts", "data": hosts})
         conn_row = await db.fetch_one("SELECT mode FROM nut_connection_config WHERE id = 1")
         services = await supervisor.get_services_status(

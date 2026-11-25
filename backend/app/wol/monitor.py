@@ -6,7 +6,7 @@ import asyncio
 import logging
 from typing import Awaitable, Callable
 
-from app.database import Database, utc_now_iso
+from app.database import Database, fetch_public_hosts, utc_now_iso
 from app.services.ws_hub import WebSocketHub
 from app.wol.network import check_host_reachable
 
@@ -96,7 +96,7 @@ class HostMonitor:
 
         await self.db.conn.commit()
         if self.ws_hub is not None:
-            all_hosts = await self.db.fetch_all("SELECT * FROM hosts ORDER BY boot_priority ASC, id ASC")
+            all_hosts = await fetch_public_hosts(self.db)
             await self.ws_hub.broadcast("hosts", all_hosts)
 
     async def _run_loop(self) -> None:

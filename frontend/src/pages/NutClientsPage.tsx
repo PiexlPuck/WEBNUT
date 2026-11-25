@@ -18,6 +18,7 @@ import type {
   NutClientConfigResponse,
   NutClientPlatform,
   NutClientsOverview,
+  SshDeployResponse,
   TelemetrySnapshot,
 } from "../types";
 
@@ -66,6 +67,17 @@ export function NutClientsPage({
   const [creatingUser, setCreatingUser] = useState(false);
   const [userFeedback, setUserFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
 
+  // One-button SSH deploy state
+  const [sshForm, setSshForm] = useState({
+    ssh_port: 22,
+    ssh_username: "root",
+    ssh_password: "",
+    ssh_sudo_password: "",
+    save_credentials: true,
+  });
+  const [deployingSsh, setDeployingSsh] = useState(false);
+  const [sshResult, setSshResult] = useState<SshDeployResponse | null>(null);
+
   const loadOverview = useCallback(async () => {
     setLoadingOverview(true);
     try {
@@ -93,33 +105,39 @@ export function NutClientsPage({
     void loadOverview();
   }, [loadOverview]);
 
-  // Pre-fill when navigated from a specific Managed Host
-  useEffect(() => {
-    if (preselectedHostId === null) return;
-    const h = hosts.find((item) => item.id === preselectedHostId);
-    if (h) {
+  const applyHostSelection = useCallback(
+    (h: HostRecord) => {
       setSelectedHostId(String(h.id));
       setForm((prev) => ({
         ...prev,
         platform: h.nut_client_platform || prev.platform,
-        ups_name: h.nut_ups_name || prev.ups_name,
+        ups_name: h.virtual_ups_name || h.nut_ups_name || prev.ups_name,
         username: h.nut_client_user || prev.username,
       }));
-    }
+      setSshForm({
+        ssh_port: h.ssh_port || 22,
+        ssh_username: h.ssh_username || "root",
+        ssh_password: h.ssh_password || "",
+        ssh_sudo_password: h.ssh_sudo_password || "",
+        save_credentials: true,
+      });
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (preselectedHostId === null) return;
+    const h = hosts.find((item) => item.id === preselectedHostId);
+    if (h) applyHostSelection(h);
     onClearPreselectedHost();
-  }, [preselectedHostId, hosts, onClearPreselectedHost]);
+  }, [preselectedHostId, hosts, onClearPreselectedHost, applyHostSelection]);
 
   const handleSelectHost = (hostIdStr: string) => {
     setSelectedHostId(hostIdStr);
+    setSshResult(null);
     if (!hostIdStr) return;
     const h = hosts.find((item) => item.id === Number(hostIdStr));
-    if (!h) return;
-    setForm((prev) => ({
-      ...prev,
-      platform: h.nut_client_platform || prev.platform,
-      ups_name: h.nut_ups_name || overview?.ups_names[0] || prev.ups_name,
-      username: h.nut_client_user || prev.username,
-    }));
+    if (h) applyHostSelection(h);
   };
 
   const handleCreateUser = async () => {
@@ -128,15 +146,11 @@ export function NutClientsPage({
     setUserFeedback(null);
     try {
       const res = await api.createSecondaryNutUser(newUser.trim(), newPass.trim());
-      setForm((prev) => ({
-        ...prev,
-        username: res.username,
-        password: res.password,
-      }));
+      setForm((prev) => ({ ...prev, username: res.username, password: res.password }));
       setNewPass(res.password);
       setUserFeedback({
         ok: true,
-        msg: `Created/updated secondary NUT user '${res.username}' and applied upsd.users. Password pre-filled below.`,
+        msg: `Created/updated secondary NUT user '${res.username}'. Password pre-filled below.`,
       });
       await loadOverview();
     } catch (err) {
@@ -149,12 +163,47 @@ export function NutClientsPage({
     }
   };
 
+  const handleOneButtonSshDeploy = async () => {
+    const hid = Number(selectedHostId);
+    if (!hid) {
+      setUserFeedback({
+        ok: false,
+        msg: "Select a Managed Host first to deploy via SSH/SFTP.",
+      });
+      return;
+    }
+    setDeployingSsh(true);
+    setSshResult(null);
+    try {
+      const res = await api.deployHostClient(hid, {
+        ...sshForm,
+        nut_username: form.username,
+        nut_password: form.password || "webnut_stream",
+        final_delay: form.final_delay,
+        shutdown_cmd: form.shutdown_cmd,
+      });
+      setSshResult(res);
+      await loadOverview();
+    } catch (err) {
+      setSshResult({
+        ok: false,
+        steps: [],
+        error: err instanceof ApiError ? err.message : "SSH deployment failed",
+        virtual_ups_name: "",
+        server_host: "",
+        nut_port: form.nut_port,
+      });
+    } finally {
+      setDeployingSsh(false);
+    }
+  };
+
   const handleGenerate = async () => {
     setUserFeedback(null);
     if (!form.password.trim()) {
       setUserFeedback({
         ok: false,
-        msg: "Enter the NUT user password (or click 'Create Secondary User' above to generate one).",
+        msg: "Enter a password (or click 'Create Secondary User' to generate one).",
       });
       return;
     }
@@ -175,37 +224,35 @@ export function NutClientsPage({
     window.setTimeout(() => setCopiedKey(null), 2000);
   };
 
-  // Live connected client IPs directly from WebSocket telemetry (real-time) + REST fallback
   const liveClientPairs = useMemo(() => {
     const ipToHost = new Map(hosts.map((h) => [h.ip_or_host.trim(), h]));
     const pairs: { upsName: string; ip: string; host?: HostRecord }[] = [];
-    for (const u of telemetry.ups_list) {
-      for (const ip of u.connected_clients ?? []) {
-        pairs.push({ upsName: u.name, ip, host: ipToHost.get(ip) });
-      }
-    }
-    if (pairs.length === 0 && overview?.connected_clients.length) {
-      for (const c of overview.connected_clients) {
+    const seen = new Set<string>();
+    for (const c of overview?.connected_clients ?? []) {
+      const k = `${c.ups_name}:${c.client_ip}`;
+      if (!seen.has(k)) {
+        seen.add(k);
         pairs.push({
           upsName: c.ups_name,
           ip: c.client_ip,
-          host: hosts.find((h) => h.id === c.matched_host_id),
+          host: hosts.find((h) => h.id === c.matched_host_id) ?? ipToHost.get(c.client_ip),
         });
+      }
+    }
+    for (const u of telemetry.ups_list) {
+      for (const ip of u.connected_clients ?? []) {
+        const k = `${u.name}:${ip}`;
+        if (!seen.has(k)) {
+          seen.add(k);
+          pairs.push({ upsName: u.name, ip, host: ipToHost.get(ip) });
+        }
       }
     }
     return pairs;
   }, [telemetry.ups_list, overview, hosts]);
 
-  const connectedIpSet = useMemo(
-    () => new Set(liveClientPairs.map((p) => p.ip)),
-    [liveClientPairs]
-  );
-
-  const linkedHosts = useMemo(
-    () => hosts.filter((h) => h.nut_client_enabled),
-    [hosts]
-  );
-
+  const connectedIpSet = useMemo(() => new Set(liveClientPairs.map((p) => p.ip)), [liveClientPairs]);
+  const linkedHosts = useMemo(() => hosts.filter((h) => h.nut_client_enabled), [hosts]);
   const missingLinkedHosts = useMemo(
     () => linkedHosts.filter((h) => !connectedIpSet.has(h.ip_or_host.trim())),
     [linkedHosts, connectedIpSet]
@@ -216,11 +263,11 @@ export function NutClientsPage({
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
           <h2 className="text-2xl font-bold text-white tracking-tight">
-            NUT Client Configurator &amp; Pipeline Link
+            Client Setup &amp; Smart NUT Repeater
           </h2>
           <p className="text-sm text-slate-400">
-            Configure secondary `upsmon` clients on your servers so they shut down gracefully on
-            `OB`/`LB` before WEBNUT wakes them on `OL`
+            All clients connect to WebNUT&apos;s Repeater stream so per-host shutdown &amp;
+            disconnect rules stream live from the UI
           </p>
         </div>
         <button
@@ -233,37 +280,37 @@ export function NutClientsPage({
         </button>
       </div>
 
-      {/* End-to-End Outage -> Shutdown -> Recovery Pipeline Banner */}
+      {/* Pipeline Bar */}
       <div className="rounded-2xl border border-slate-800 bg-surface-900 p-4">
         <div className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold mb-3">
-          Unified Outage &amp; Recovery Pipeline
+          WebNUT Repeater &amp; Recovery Pipeline
         </div>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-center text-xs">
           <div className="rounded-xl bg-surface-950 border border-slate-800 p-3">
-            <div className="font-semibold text-amber-300">1. UPS On Battery (OB)</div>
+            <div className="font-semibold text-amber-300">1. Upstream UPS Event</div>
             <div className="text-slate-400 mt-1">
-              WEBNUT freezes pre-outage snapshot &amp; notifies `upsd` clients
+              USB, Serial, SNMP, or External NUT Server polled live
             </div>
           </div>
           <div className="rounded-xl bg-surface-950 border border-indigo-500/30 p-3">
             <div className="flex items-center justify-between">
-              <span className="font-semibold text-indigo-300">2. Client Graceful Shutdown</span>
+              <span className="font-semibold text-indigo-300">2. Virtual UPS Stream</span>
               <ArrowRight className="h-3.5 w-3.5 text-slate-500 hidden md:block" />
             </div>
             <div className="text-slate-300 mt-1 font-mono">
-              {liveClientPairs.length} connected • {linkedHosts.length} linked host(s)
+              {liveClientPairs.length} connected • {linkedHosts.length} linked
             </div>
           </div>
           <div className="rounded-xl bg-surface-950 border border-slate-800 p-3">
-            <div className="font-semibold text-emerald-300">3. Power Restored (OL)</div>
+            <div className="font-semibold text-emerald-300">3. Per-Host Shutdown</div>
             <div className="text-slate-400 mt-1">
-              Battery meets safe threshold &amp; stability hold timer completes
+              Streams OB LB FSD or holds grace timer per host
             </div>
           </div>
           <div className="rounded-xl bg-surface-950 border border-slate-800 p-3">
-            <div className="font-semibold text-sky-300">4. Staggered WoL + Retry</div>
+            <div className="font-semibold text-sky-300">4. Staged Battery WoL</div>
             <div className="text-slate-400 mt-1">
-              Wakes hosts in priority order &amp; verifies Ping/TCP reachability
+              Wakes each host at its own OL battery % threshold
             </div>
           </div>
         </div>
@@ -281,15 +328,13 @@ export function NutClientsPage({
         </div>
       )}
 
-      {/* Live Connected NUT Clients + Linked Host Mismatches */}
+      {/* Live Clients + Quick User */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="rounded-2xl border border-slate-800 bg-surface-900 overflow-hidden">
           <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Link2 className="h-4 w-4 text-emerald-400" />
-              <h3 className="text-sm font-semibold text-white">
-                Live Connected NUT Clients (`upsd`)
-              </h3>
+              <h3 className="text-sm font-semibold text-white">Live Connected NUT Clients</h3>
             </div>
             <span className="text-xs font-mono text-slate-400">
               {liveClientPairs.length} active
@@ -303,7 +348,7 @@ export function NutClientsPage({
               >
                 <div>
                   <div className="font-mono text-white font-medium">{c.ip}</div>
-                  <div className="text-slate-400">UPS: {c.upsName}</div>
+                  <div className="text-slate-400">Stream: {c.upsName}</div>
                 </div>
                 {c.host ? (
                   <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
@@ -312,20 +357,19 @@ export function NutClientsPage({
                   </span>
                 ) : (
                   <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-400">
-                    Unregistered Client
+                    Connected Client
                   </span>
                 )}
               </div>
             ))}
             {liveClientPairs.length === 0 && (
               <div className="p-6 text-center text-xs text-slate-500">
-                No external `upsmon` clients currently reported by `upsd` (`LIST CLIENT`).
+                No external `upsmon` clients connected to WebNUT Repeater yet.
               </div>
             )}
           </div>
         </div>
 
-        {/* Quick Secondary User Creator */}
         <div className="rounded-2xl border border-slate-800 bg-surface-900 p-5 space-y-4">
           <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
             <KeyRound className="h-4 w-4 text-indigo-400" />
@@ -334,43 +378,35 @@ export function NutClientsPage({
                 Quick Secondary NUT User (`upsd.users`)
               </h3>
               <p className="text-xs text-slate-400">
-                Create or rotate a `secondary` client account and reload `upsd` automatically
+                Create credentials or use any username with WebNUT&apos;s Repeater
               </p>
             </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs text-slate-400 mb-1">Username</label>
-              <input
-                value={newUser}
-                onChange={(e) => setNewUser(e.target.value)}
-                placeholder="wolnut_client"
-                className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-sm text-white font-mono"
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-slate-400 mb-1">
-                Password (blank = auto-generate)
-              </label>
-              <input
-                type="text"
-                value={newPass}
-                onChange={(e) => setNewPass(e.target.value)}
-                placeholder="Auto-generated strong secret"
-                className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-sm text-white font-mono"
-              />
-            </div>
+            <input
+              value={newUser}
+              onChange={(e) => setNewUser(e.target.value)}
+              placeholder="wolnut_client"
+              className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-sm text-white font-mono"
+            />
+            <input
+              type="text"
+              value={newPass}
+              onChange={(e) => setNewPass(e.target.value)}
+              placeholder="Password (blank = auto)"
+              className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-sm text-white font-mono"
+            />
           </div>
 
           <div className="flex items-center justify-between gap-3">
-            <span className="text-xs text-slate-500">
-              Existing users: {overview?.available_users.join(", ") || "—"}
+            <span className="text-xs text-slate-500 truncate">
+              Users: {overview?.available_users.join(", ") || "—"}
             </span>
             <button
               onClick={handleCreateUser}
               disabled={creatingUser}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white disabled:opacity-50 shrink-0"
             >
               <CheckCircle2 className="h-3.5 w-3.5" />
               {creatingUser ? "Applying..." : "Create Secondary User"}
@@ -381,10 +417,10 @@ export function NutClientsPage({
             <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 flex items-start gap-2.5 text-xs text-amber-200">
               <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
               <div>
-                <strong>{missingLinkedHosts.length} linked host(s)</strong> marked for NUT client
-                shutdown are not currently connected to `upsd`:{" "}
+                <strong>{missingLinkedHosts.length} linked host(s)</strong> not currently
+                connected:{" "}
                 <span className="font-mono">
-                  {missingLinkedHosts.map((h) => `${h.name} (${h.ip_or_host})`).join(", ")}
+                  {missingLinkedHosts.map((h) => h.name).join(", ")}
                 </span>
               </div>
             </div>
@@ -392,13 +428,13 @@ export function NutClientsPage({
         </div>
       </div>
 
-      {/* Config Generator */}
+      {/* One-Button SSH/SFTP Deployment & Manual Config Generator */}
       <div className="rounded-2xl border border-slate-800 bg-surface-900 p-5 space-y-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
           <div className="flex items-center gap-2">
-            <Terminal className="h-4 w-4 text-sky-400" />
+            <Terminal className="h-4 w-4 text-emerald-400" />
             <h3 className="text-base font-semibold text-white">
-              Client Configuration &amp; Setup Script Generator
+              Deploy via SSH/SFTP or Generate Config
             </h3>
           </div>
           <select
@@ -406,13 +442,83 @@ export function NutClientsPage({
             onChange={(e) => handleSelectHost(e.target.value)}
             className="rounded-lg bg-surface-950 border border-slate-700 px-3 py-1.5 text-xs text-slate-200"
           >
-            <option value="">Load defaults from Managed Host...</option>
+            <option value="">Select Managed Host (recommended)...</option>
             {hosts.map((h) => (
               <option key={h.id} value={h.id}>
-                {h.name} ({h.ip_or_host})
+                {h.name} ({h.ip_or_host}) → {h.virtual_ups_name || h.name}
               </option>
             ))}
           </select>
+        </div>
+
+        {/* One-Button SSH Deploy Strip */}
+        <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-xs font-semibold text-emerald-300">
+              One-Button Remote SSH/SFTP Setup (Linux / Proxmox)
+            </div>
+            <button
+              onClick={() => void handleOneButtonSshDeploy()}
+              disabled={deployingSsh || !selectedHostId || !sshForm.ssh_password.trim()}
+              className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-medium text-white disabled:opacity-50"
+            >
+              {deployingSsh ? "Deploying..." : "One-Button SSH Deploy"}
+            </button>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+            <input
+              value={sshForm.ssh_username}
+              onChange={(e) => setSshForm({ ...sshForm, ssh_username: e.target.value })}
+              placeholder="SSH username (e.g. root)"
+              className="rounded-lg bg-surface-950 border border-slate-700 px-3 py-1.5 text-xs font-mono text-white"
+            />
+            <input
+              type="password"
+              value={sshForm.ssh_password}
+              onChange={(e) => setSshForm({ ...sshForm, ssh_password: e.target.value })}
+              placeholder="SSH password"
+              className="rounded-lg bg-surface-950 border border-slate-700 px-3 py-1.5 text-xs font-mono text-white"
+            />
+            <input
+              type="number"
+              value={sshForm.ssh_port}
+              onChange={(e) => setSshForm({ ...sshForm, ssh_port: Number(e.target.value) })}
+              placeholder="22"
+              className="rounded-lg bg-surface-950 border border-slate-700 px-3 py-1.5 text-xs font-mono text-white"
+            />
+            <label className="inline-flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={sshForm.save_credentials}
+                onChange={(e) =>
+                  setSshForm({ ...sshForm, save_credentials: e.target.checked })
+                }
+                className="rounded border-slate-600 bg-surface-950 text-emerald-500"
+              />
+              Save encrypted password
+            </label>
+          </div>
+
+          {sshResult && (
+            <div
+              className={`rounded-lg border p-3 text-xs space-y-1 ${
+                sshResult.ok
+                  ? "border-emerald-500/40 bg-surface-950 text-emerald-300"
+                  : "border-rose-500/40 bg-surface-950 text-rose-300"
+              }`}
+            >
+              <div className="font-semibold">
+                {sshResult.ok
+                  ? `Deployed to ${sshResult.virtual_ups_name}@${sshResult.server_host}:${sshResult.nut_port}`
+                  : sshResult.error}
+              </div>
+              {sshResult.steps.map((s, i) => (
+                <div key={i} className="font-mono text-slate-300">
+                  • {s}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Platform Tabs */}
@@ -434,16 +540,15 @@ export function NutClientsPage({
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <div>
-            <label className="block text-xs text-slate-400 mb-1">NUT Server IP / Host</label>
+            <label className="block text-xs text-slate-400 mb-1">WebNUT Repeater IP</label>
             <input
               value={form.server_host}
               onChange={(e) => setForm({ ...form, server_host: e.target.value })}
-              placeholder="192.168.1.10"
               className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-sm text-white font-mono"
             />
           </div>
           <div>
-            <label className="block text-xs text-slate-400 mb-1">NUT Port</label>
+            <label className="block text-xs text-slate-400 mb-1">Repeater Port</label>
             <input
               type="number"
               value={form.nut_port}
@@ -452,16 +557,15 @@ export function NutClientsPage({
             />
           </div>
           <div>
-            <label className="block text-xs text-slate-400 mb-1">UPS Name</label>
+            <label className="block text-xs text-slate-400 mb-1">Virtual / UPS Name</label>
             <input
               value={form.ups_name}
               onChange={(e) => setForm({ ...form, ups_name: e.target.value })}
-              placeholder="ups1"
               className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-sm text-white font-mono"
             />
           </div>
           <div>
-            <label className="block text-xs text-slate-400 mb-1">NUT Client Username</label>
+            <label className="block text-xs text-slate-400 mb-1">Username</label>
             <input
               value={form.username}
               onChange={(e) => setForm({ ...form, username: e.target.value })}
@@ -469,12 +573,12 @@ export function NutClientsPage({
             />
           </div>
           <div>
-            <label className="block text-xs text-slate-400 mb-1">NUT Client Password</label>
+            <label className="block text-xs text-slate-400 mb-1">Password</label>
             <input
               type="text"
               value={form.password}
               onChange={(e) => setForm({ ...form, password: e.target.value })}
-              placeholder="Password from upsd.users"
+              placeholder="Password"
               className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-sm text-white font-mono"
             />
           </div>
@@ -495,7 +599,7 @@ export function NutClientsPage({
             onClick={() => void handleGenerate()}
             className="px-5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm font-medium text-white"
           >
-            Generate Client Configuration
+            Generate Manual Config / Script
           </button>
         </div>
 
@@ -505,9 +609,6 @@ export function NutClientsPage({
 
             {generated.gui_fields.length > 0 && (
               <div className="rounded-xl border border-slate-800 bg-surface-950 overflow-hidden">
-                <div className="px-4 py-2.5 border-b border-slate-800 text-xs font-semibold text-slate-300">
-                  GUI Settings
-                </div>
                 <div className="divide-y divide-slate-800/70">
                   {generated.gui_fields.map((gf) => (
                     <div
@@ -519,7 +620,7 @@ export function NutClientsPage({
                         <span className="font-mono text-white">{gf.value}</span>
                         <button
                           onClick={() => void copyText(`gf-${gf.label}`, gf.value)}
-                          className="p-1 rounded bg-surface-800 text-slate-300 hover:text-white"
+                          className="p-1 rounded bg-surface-800 text-slate-300"
                         >
                           {copiedKey === `gf-${gf.label}` ? (
                             <Check className="h-3 w-3 text-emerald-400" />
@@ -538,11 +639,11 @@ export function NutClientsPage({
               <div className="rounded-xl border border-slate-800 bg-surface-950 overflow-hidden">
                 <div className="px-4 py-2.5 border-b border-slate-800 flex items-center justify-between">
                   <span className="text-xs font-semibold text-indigo-300">
-                    One-Click Setup Script (Run on Target Host)
+                    One-Click Setup Script
                   </span>
                   <button
                     onClick={() => void copyText("one-liner", generated.one_liner!)}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-surface-800 text-xs text-slate-200 hover:bg-surface-700"
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-surface-800 text-xs text-slate-200"
                   >
                     {copiedKey === "one-liner" ? (
                       <Check className="h-3.5 w-3.5 text-emerald-400" />
@@ -567,7 +668,7 @@ export function NutClientsPage({
                   <span className="text-xs font-mono text-slate-300">{f.path}</span>
                   <button
                     onClick={() => void copyText(`file-${f.path}`, f.content)}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-surface-800 text-xs text-slate-200 hover:bg-surface-700"
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-surface-800 text-xs text-slate-200"
                   >
                     {copiedKey === `file-${f.path}` ? (
                       <Check className="h-3.5 w-3.5 text-emerald-400" />
@@ -582,14 +683,6 @@ export function NutClientsPage({
                 </pre>
               </div>
             ))}
-
-            {generated.notes.length > 0 && (
-              <ul className="list-disc pl-5 space-y-1 text-xs text-slate-400">
-                {generated.notes.map((n, i) => (
-                  <li key={i}>{n}</li>
-                ))}
-              </ul>
-            )}
           </div>
         )}
       </div>

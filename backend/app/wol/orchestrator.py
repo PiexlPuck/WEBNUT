@@ -1,17 +1,21 @@
-"""WOLNUT-style power recovery orchestrator & automatic retry-on-fail state machine."""
+"""WOLNUT-style power recovery orchestrator, per-host shutdown streaming, and disconnect grace engine."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
-from app.database import Database, utc_now_iso
+from app.database import Database, fetch_public_hosts, utc_now_iso
 from app.models.schemas import OrchestratorConfigModel, OrchestratorStateModel
 from app.notifications.dispatcher import NotificationDispatcher
 from app.nut.client import NutTcpClient
+from app.nut.repeater import NutRepeaterServer, VirtualUpsOverride
+from app.services.crypto import SecretBox
 from app.services.event_log import EventLogService
+from app.services.ssh_deployer import execute_ssh_shutdown
 from app.services.ws_hub import WebSocketHub
 from app.wol.magic_packet import send_wol_packet
 from app.wol.network import check_host_reachable
@@ -20,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 ReachabilityFn = Callable[[str, str, int | None, float], Awaitable[bool]]
 WolSenderFn = Callable[[str, str | None], list[str]]
+SshShutdownFn = Callable[[str, int, str, str, str, str], Awaitable[tuple[bool, str]]]
 
 
 def _parse_iso(ts: str | None) -> datetime | None:
@@ -31,8 +36,17 @@ def _parse_iso(ts: str | None) -> datetime | None:
         return None
 
 
+def make_virtual_ups_name(host_row: dict) -> str:
+    explicit = str(host_row.get("virtual_ups_name") or "").strip()
+    if explicit:
+        return explicit
+    raw = str(host_row.get("name") or f"host_{host_row.get('id', 1)}")
+    slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", raw.strip()).strip("_").lower()
+    return slug or f"host_{host_row.get('id', 1)}"
+
+
 class RecoveryOrchestrator:
-    """Monitors UPS transitions (OB -> OL) and orchestrates staggered WoL recovery with retries."""
+    """Monitors UPS transitions, streams per-host NUT shutdowns, enforces disconnect grace, and wakes hosts."""
 
     def __init__(
         self,
@@ -44,6 +58,9 @@ class RecoveryOrchestrator:
         reachability_fn: ReachabilityFn = check_host_reachable,
         wol_sender: WolSenderFn = send_wol_packet,
         check_poll_step: float = 3.0,
+        repeater: NutRepeaterServer | None = None,
+        secret_box: SecretBox | None = None,
+        ssh_shutdown_fn: SshShutdownFn = execute_ssh_shutdown,
     ) -> None:
         self.db = db
         self.nut_client = nut_client
@@ -53,6 +70,9 @@ class RecoveryOrchestrator:
         self.reachability_fn = reachability_fn
         self.wol_sender = wol_sender
         self.check_poll_step = check_poll_step
+        self.repeater = repeater
+        self.secret_box = secret_box
+        self.ssh_shutdown_fn = ssh_shutdown_fn
 
         self._poll_task: asyncio.Task[None] | None = None
         self._recovery_task: asyncio.Task[None] | None = None
@@ -62,7 +82,15 @@ class RecoveryOrchestrator:
         self._last_comms_ok: bool | None = None
         self._low_battery_notified: bool = False
         self._power_restored_notified: bool = False
-        self._latest_telemetry: dict = {"connected": False, "error": "Initializing", "ups_list": [], "updated_at": utc_now_iso()}
+        self._disconnect_started_at: datetime | None = None
+        self._host_shutdown_forced: dict[int, tuple[str, str]] = {}
+        self._host_ssh_shutdown_sent: set[int] = set()
+        self._latest_telemetry: dict = {
+            "connected": False,
+            "error": "Initializing",
+            "ups_list": [],
+            "updated_at": utc_now_iso(),
+        }
 
     @property
     def latest_telemetry(self) -> dict:
@@ -79,6 +107,10 @@ class RecoveryOrchestrator:
             host_poll_interval_sec=int(row["host_poll_interval_sec"]),
             ups_poll_interval_sec=int(row["ups_poll_interval_sec"]),
             auto_recovery_enabled=bool(row["auto_recovery_enabled"]),
+            disconnect_policy=row.get("disconnect_policy") or "keep_running",
+            disconnect_grace_sec=int(row.get("disconnect_grace_sec", 600)),
+            repeater_enabled=bool(row.get("repeater_enabled", 1)),
+            repeater_port=int(row.get("repeater_port", 3493)),
         )
 
     async def update_config(self, cfg: OrchestratorConfigModel) -> OrchestratorConfigModel:
@@ -92,6 +124,10 @@ class RecoveryOrchestrator:
                 host_poll_interval_sec = ?,
                 ups_poll_interval_sec = ?,
                 auto_recovery_enabled = ?,
+                disconnect_policy = ?,
+                disconnect_grace_sec = ?,
+                repeater_enabled = ?,
+                repeater_port = ?,
                 updated_at = ?
             WHERE id = 1
             """,
@@ -102,6 +138,10 @@ class RecoveryOrchestrator:
                 cfg.host_poll_interval_sec,
                 cfg.ups_poll_interval_sec,
                 1 if cfg.auto_recovery_enabled else 0,
+                cfg.disconnect_policy,
+                cfg.disconnect_grace_sec,
+                1 if cfg.repeater_enabled else 0,
+                cfg.repeater_port,
                 now,
             ),
         )
@@ -109,7 +149,7 @@ class RecoveryOrchestrator:
             "orchestrator",
             "info",
             "orchestrator_config_updated",
-            "Updated WoL recovery policy settings",
+            "Updated recovery, disconnect grace, and repeater settings",
             cfg.model_dump(),
         )
         return await self.get_config()
@@ -132,12 +172,22 @@ class RecoveryOrchestrator:
                 elapsed = (datetime.now(timezone.utc) - started).total_seconds()
                 remaining = max(0, int(round(cfg.stability_hold_sec - elapsed)))
 
+        disc_elapsed = 0
+        disc_iso: str | None = None
+        if self._disconnect_started_at is not None:
+            disc_iso = self._disconnect_started_at.isoformat()
+            disc_elapsed = max(
+                0, int((datetime.now(timezone.utc) - self._disconnect_started_at).total_seconds())
+            )
+
         return OrchestratorStateModel(
             state=row["state"],
             last_ups_status=row["last_ups_status"],
             outage_started_at=row["outage_started_at"],
             stabilizing_started_at=row["stabilizing_started_at"],
             recovery_started_at=row["recovery_started_at"],
+            disconnect_started_at=disc_iso,
+            disconnect_elapsed_sec=disc_elapsed,
             snapshot_frozen=bool(row["snapshot_frozen"]),
             is_dry_run=bool(row["is_dry_run"]),
             stability_remaining_sec=remaining,
@@ -151,7 +201,7 @@ class RecoveryOrchestrator:
 
     async def _broadcast_hosts(self) -> None:
         if self.ws_hub is not None:
-            rows = await self.db.fetch_all("SELECT * FROM hosts ORDER BY boot_priority ASC, id ASC")
+            rows = await fetch_public_hosts(self.db)
             await self.ws_hub.broadcast("hosts", rows)
 
     async def reconcile_on_startup(self) -> None:
@@ -162,14 +212,14 @@ class RecoveryOrchestrator:
 
         now = utc_now_iso()
         interrupted_hosts = await self.db.fetch_all(
-            "SELECT id FROM hosts WHERE wake_state IN ('WAITING_STAGGER', 'WAKING', 'RETRYING')"
+            "SELECT id FROM hosts WHERE wake_state IN ('WAITING_STAGGER', 'WAITING_BATTERY', 'WAKING', 'RETRYING')"
         )
         if interrupted_hosts:
             await self.db.execute(
                 """
                 UPDATE hosts
                 SET wake_state = 'IDLE', wake_attempt = 0, updated_at = ?
-                WHERE wake_state IN ('WAITING_STAGGER', 'WAKING', 'RETRYING')
+                WHERE wake_state IN ('WAITING_STAGGER', 'WAITING_BATTERY', 'WAKING', 'RETRYING')
                 """,
                 (now,),
             )
@@ -206,8 +256,154 @@ class RecoveryOrchestrator:
                 pass
         self._recovery_task = None
 
+    async def _sync_repeater(self, ups_list: list[dict], default_ups_name: str) -> None:
+        if self.repeater is None:
+            return
+        hosts = await self.db.fetch_all("SELECT * FROM hosts WHERE enabled = 1")
+        virtuals: list[VirtualUpsOverride] = []
+        for h in hosts:
+            hid = int(h["id"])
+            vname = make_virtual_ups_name(h)
+            upstream = str(h.get("nut_ups_name") or "").strip() or default_ups_name
+            forced = self._host_shutdown_forced.get(hid)
+            virtuals.append(
+                VirtualUpsOverride(
+                    virtual_name=vname,
+                    host_id=hid,
+                    host_name=str(h["name"]),
+                    upstream_ups=upstream,
+                    forced_status=forced[0] if forced else None,
+                    reason=forced[1] if forced else "",
+                )
+            )
+        self.repeater.update_state(ups_list, virtuals)
+
+    async def _trigger_host_shutdown(self, host: dict, reason: str) -> None:
+        hid = int(host["id"])
+        name = str(host["name"])
+        mode = str(host.get("shutdown_mode") or "nut_stream")
+        if mode == "disabled":
+            return
+
+        current_forced = self._host_shutdown_forced.get(hid)
+        if not current_forced or current_forced[0] != "OB LB FSD":
+            if mode in ("nut_stream", "both"):
+                self._host_shutdown_forced[hid] = ("OB LB FSD", reason)
+                await self.event_log.record(
+                    "orchestrator",
+                    "warning",
+                    "host_shutdown_streamed",
+                    f"Streaming OB LB FSD shutdown signal to '{name}' ({reason})",
+                    {"host_id": hid, "reason": reason, "virtual_ups": make_virtual_ups_name(host)},
+                )
+
+        if mode in ("ssh", "both") and hid not in self._host_ssh_shutdown_sent:
+            self._host_ssh_shutdown_sent.add(hid)
+            ssh_user = str(host.get("ssh_username") or "").strip()
+            ssh_pw_enc = str(host.get("ssh_password_enc") or "")
+            ssh_sudo_enc = str(host.get("ssh_sudo_password_enc") or "")
+            if ssh_user and ssh_pw_enc and self.secret_box is not None:
+                pw = self.secret_box.decrypt(ssh_pw_enc)
+                sudo_pw = self.secret_box.decrypt(ssh_sudo_enc)
+                ok, detail = await self.ssh_shutdown_fn(
+                    str(host["ip_or_host"]),
+                    int(host.get("ssh_port") or 22),
+                    ssh_user,
+                    pw,
+                    sudo_pw,
+                    str(host.get("ssh_shutdown_cmd") or "sudo -S shutdown -h now"),
+                )
+                await self.event_log.record(
+                    "orchestrator",
+                    "warning" if ok else "error",
+                    "host_ssh_shutdown",
+                    f"SSH fallback shutdown for '{name}': {detail}",
+                    {"host_id": hid, "ok": ok, "reason": reason},
+                )
+
+    async def _evaluate_disconnect_policies(
+        self,
+        cfg: OrchestratorConfigModel,
+        now_dt: datetime,
+        ups_list: list[dict],
+        default_ups_name: str,
+    ) -> None:
+        if self._disconnect_started_at is None:
+            self._disconnect_started_at = now_dt
+        elapsed = (now_dt - self._disconnect_started_at).total_seconds()
+
+        hosts = await self.db.fetch_all("SELECT * FROM hosts WHERE enabled = 1")
+        for h in hosts:
+            hid = int(h["id"])
+            h_policy = str(h.get("disconnect_policy") or "inherit")
+            effective_policy = cfg.disconnect_policy if h_policy == "inherit" else h_policy
+            h_grace = h.get("disconnect_grace_sec")
+            effective_grace = (
+                int(h_grace) if h_grace is not None else int(cfg.disconnect_grace_sec)
+            )
+            if effective_policy == "shutdown_after_grace" and elapsed >= effective_grace:
+                await self._trigger_host_shutdown(
+                    h, f"UPS disconnected for {int(elapsed)}s (>= {effective_grace}s grace)"
+                )
+            elif self._host_shutdown_forced.get(hid, ("", ""))[0] != "OB LB FSD":
+                # Hold virtual stream at OL so clients keep running during grace window
+                self._host_shutdown_forced[hid] = ("OL", "disconnect_grace_hold")
+
+        await self._sync_repeater(ups_list, default_ups_name)
+        await self._broadcast_state()
+
+    async def _evaluate_on_battery_policies(
+        self,
+        charge: float | None,
+        is_lb: bool,
+        ob_elapsed: float,
+        ups_list: list[dict],
+        default_ups_name: str,
+    ) -> None:
+        hosts = await self.db.fetch_all("SELECT * FROM hosts WHERE enabled = 1")
+        for h in hosts:
+            mode = str(h.get("shutdown_mode") or "nut_stream")
+            if mode == "disabled":
+                continue
+
+            bat_thresh = h.get("shutdown_battery_pct")
+            ob_delay = h.get("shutdown_ob_delay_sec")
+
+            reason: str | None = None
+            if is_lb:
+                reason = "UPS Low Battery (LB)"
+            elif bat_thresh is not None and charge is not None and float(charge) <= float(bat_thresh):
+                reason = f"Battery {charge:.0f}% <= {float(bat_thresh):.0f}% host shutdown threshold"
+            elif ob_delay is not None and ob_elapsed >= int(ob_delay):
+                reason = f"On battery {int(ob_elapsed)}s >= {int(ob_delay)}s delay"
+
+            if reason:
+                await self._trigger_host_shutdown(h, reason)
+            elif self._host_shutdown_forced.get(int(h["id"]), ("", ""))[0] != "OB LB FSD":
+                # Stream clean OB without LB/FSD until this host's threshold is reached
+                self._host_shutdown_forced[int(h["id"])] = ("OB", "waiting_host_threshold")
+
+        await self._sync_repeater(ups_list, default_ups_name)
+
+    async def _min_eligible_wake_battery(self, cfg: OrchestratorConfigModel) -> float:
+        eligible = await self.db.fetch_all(
+            """
+            SELECT wake_min_battery_charge FROM hosts
+            WHERE enabled = 1 AND (was_online_before_outage = 1 OR always_wake = 1)
+            """
+        )
+        if not eligible:
+            return cfg.min_battery_charge
+        thresholds = [
+            float(r["wake_min_battery_charge"])
+            if r["wake_min_battery_charge"] is not None
+            else cfg.min_battery_charge
+            for r in eligible
+        ]
+        return min(thresholds)
+
     async def evaluate_telemetry(self, snapshot: dict) -> None:
-        """Process a TelemetrySnapshot dict and advance the recovery state machine."""
+        """Process a TelemetrySnapshot dict and advance state machine + repeater streams."""
         self._latest_telemetry = snapshot
         if self.ws_hub is not None:
             await self.ws_hub.broadcast("telemetry", snapshot)
@@ -220,8 +416,10 @@ class RecoveryOrchestrator:
         current_state = state_row["state"]
         ups_list = snapshot.get("ups_list") or []
         connected = bool(snapshot.get("connected"))
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
 
-        # Handle UPS communications status
+        # Handle UPS communications status / Disconnection grace policy
         if not connected or not ups_list:
             if self._last_comms_ok is True:
                 self._last_comms_ok = False
@@ -236,10 +434,11 @@ class RecoveryOrchestrator:
                 await self.dispatcher.dispatch_event(
                     "ups_comms_lost",
                     "UPS Communications Lost",
-                    f"WEBNUT lost connection to upsd: {err}",
+                    f"WebNUT lost connection to upsd: {err}. Grace policy: {cfg.disconnect_policy}.",
                 )
             elif self._last_comms_ok is None:
                 self._last_comms_ok = False
+            await self._evaluate_disconnect_policies(cfg, now_dt, ups_list, cfg.monitored_ups or "ups1")
             return
 
         # Select monitored UPS
@@ -255,7 +454,7 @@ class RecoveryOrchestrator:
         status_str = str(target_ups.get("status", "UNKNOWN"))
         tokens = set(target_ups.get("status_tokens") or status_str.split())
         charge = target_ups.get("battery_charge")
-        ups_name = target_ups.get("name", "ups")
+        ups_name = str(target_ups.get("name", "ups"))
 
         if "COMMBAD" in tokens or "NOCOMM" in tokens:
             if self._last_comms_ok is True:
@@ -270,13 +469,14 @@ class RecoveryOrchestrator:
                 await self.dispatcher.dispatch_event(
                     "ups_comms_lost",
                     f"UPS '{ups_name}' Communications Lost",
-                    f"UPS '{ups_name}' status is {status_str}.",
+                    f"UPS '{ups_name}' status is {status_str}. Grace policy: {cfg.disconnect_policy}.",
                 )
+            await self._evaluate_disconnect_policies(cfg, now_dt, ups_list, ups_name)
             return
 
+        # Communications healthy
         self._last_comms_ok = True
-        now_dt = datetime.now(timezone.utc)
-        now = now_dt.isoformat()
+        self._disconnect_started_at = None
 
         is_ob = "OB" in tokens
         is_ol = "OL" in tokens
@@ -303,8 +503,10 @@ class RecoveryOrchestrator:
         # State transitions
         if is_ob:
             self._power_restored_notified = False
+            outage_dt = _parse_iso(state_row["outage_started_at"]) or now_dt
+            ob_elapsed = max(0.0, (now_dt - outage_dt).total_seconds())
+
             if current_state == "NORMAL":
-                # Freeze pre-outage snapshot and transition to ON_BATTERY
                 await self.db.execute(
                     """
                     UPDATE orchestrator_state
@@ -332,11 +534,11 @@ class RecoveryOrchestrator:
                     f"Power Outage: UPS '{ups_name}' On Battery",
                     f"UPS switched to battery power (charge: {charge}%). Pre-outage host snapshot frozen.",
                 )
+                await self._evaluate_on_battery_policies(charge, is_lb, 0.0, ups_list, ups_name)
                 await self._broadcast_state()
                 return
 
             if current_state == "STABILIZING":
-                # Power flickered back to OB during stability hold
                 await self.db.execute(
                     """
                     UPDATE orchestrator_state
@@ -355,17 +557,17 @@ class RecoveryOrchestrator:
                     f"UPS '{ups_name}' returned to OB during stability hold; timer reset",
                     {"ups": ups_name, "status": status_str},
                 )
+                await self._evaluate_on_battery_policies(charge, is_lb, ob_elapsed, ups_list, ups_name)
                 await self._broadcast_state()
                 return
 
             if current_state == "RECOVERING":
-                # Power failed mid-recovery; abort active wake loop
                 await self._cancel_recovery_task()
                 await self.db.execute(
                     """
                     UPDATE hosts
                     SET wake_state = 'IDLE', wake_attempt = 0, updated_at = ?
-                    WHERE wake_state IN ('WAITING_STAGGER', 'WAKING', 'RETRYING')
+                    WHERE wake_state IN ('WAITING_STAGGER', 'WAITING_BATTERY', 'WAKING', 'RETRYING')
                     """,
                     (now,),
                 )
@@ -388,6 +590,7 @@ class RecoveryOrchestrator:
                     f"UPS '{ups_name}' returned to OB; active wake sequence aborted",
                     {"ups": ups_name},
                 )
+                await self._evaluate_on_battery_policies(charge, is_lb, ob_elapsed, ups_list, ups_name)
                 await self._broadcast_hosts()
                 await self._broadcast_state()
                 return
@@ -396,10 +599,17 @@ class RecoveryOrchestrator:
                 "UPDATE orchestrator_state SET last_ups_status = ?, updated_at = ? WHERE id = 1",
                 (status_str, now),
             )
+            await self._evaluate_on_battery_policies(charge, is_lb, ob_elapsed, ups_list, ups_name)
             return
 
         if is_ol:
-            charge_ok = charge is None or float(charge) >= cfg.min_battery_charge
+            # Clear forced shutdown overrides when utility power is back online
+            self._host_shutdown_forced.clear()
+            self._host_ssh_shutdown_sent.clear()
+            await self._sync_repeater(ups_list, ups_name)
+
+            min_needed_charge = await self._min_eligible_wake_battery(cfg)
+            charge_ok = charge is None or float(charge) >= min_needed_charge
 
             if current_state == "ON_BATTERY":
                 if not self._power_restored_notified:
@@ -452,7 +662,7 @@ class RecoveryOrchestrator:
                             "orchestrator",
                             "info",
                             "stability_hold_started",
-                            f"Battery {charge}% >= {cfg.min_battery_charge}%; holding {cfg.stability_hold_sec}s before WoL",
+                            f"Battery {charge}% >= {min_needed_charge:.0f}%; holding {cfg.stability_hold_sec}s before WoL",
                             {"battery_charge": charge, "hold_sec": cfg.stability_hold_sec},
                         )
                         await self._broadcast_state()
@@ -481,7 +691,7 @@ class RecoveryOrchestrator:
                         "orchestrator",
                         "warning",
                         "stability_hold_charge_dropped",
-                        f"Battery charge dropped to {charge}% (< {cfg.min_battery_charge}%); waiting",
+                        f"Battery charge dropped to {charge}% (< {min_needed_charge:.0f}%); waiting",
                     )
                     await self._broadcast_state()
                     return
@@ -498,10 +708,26 @@ class RecoveryOrchestrator:
                     await self._broadcast_state()
                 return
 
+        await self._sync_repeater(ups_list, ups_name)
         await self.db.execute(
             "UPDATE orchestrator_state SET last_ups_status = ?, updated_at = ? WHERE id = 1",
             (status_str, now),
         )
+
+    def _current_battery_charge(self, preferred_ups: str) -> float | None:
+        ups_list = self._latest_telemetry.get("ups_list") or []
+        if not ups_list:
+            return None
+        target = None
+        if preferred_ups:
+            for u in ups_list:
+                if u.get("name") == preferred_ups:
+                    target = u
+                    break
+        if target is None:
+            target = ups_list[0]
+        val = target.get("battery_charge")
+        return float(val) if val is not None else None
 
     async def _trigger_recovery(
         self,
@@ -526,13 +752,13 @@ class RecoveryOrchestrator:
             "orchestrator",
             "info",
             "wake_sequence_started",
-            f"Battery threshold met on '{ups_name}' ({charge}%); starting WoL recovery sequence",
+            f"Power stabilized on '{ups_name}' ({charge}%); starting staged WoL recovery",
             {"ups": ups_name, "battery_charge": charge},
         )
         await self.dispatcher.dispatch_event(
             "wake_sequence_started",
             "WoL Recovery Sequence Initiated",
-            f"UPS '{ups_name}' stabilized at {charge}% battery. Starting host recovery.",
+            f"UPS '{ups_name}' stabilized at {charge}% battery. Starting staged host recovery.",
         )
         await self._broadcast_state()
         self._recovery_task = asyncio.create_task(
@@ -562,7 +788,7 @@ class RecoveryOrchestrator:
             await self.db.execute(
                 """
                 UPDATE hosts
-                SET wake_state = ?, wake_attempt = ?, updated_at = ?
+                SET wake_state = ?, wake_attempt = ?, last_wake_error = NULL, updated_at = ?
                 WHERE id = ?
                 """,
                 (state_label, attempt, now, host_id),
@@ -730,14 +956,16 @@ class RecoveryOrchestrator:
         return False
 
     async def run_recovery_sequence(self, dry_run: bool = False) -> None:
-        """Execute staggered wake sequence for all eligible hosts."""
+        """Execute staged battery-threshold + staggered WoL recovery sequence."""
         cancelled = False
+        worker_tasks: list[asyncio.Task[bool]] = []
         try:
+            cfg = await self.get_config()
             eligible = await self.db.fetch_all(
                 """
                 SELECT * FROM hosts
                 WHERE enabled = 1 AND (was_online_before_outage = 1 OR always_wake = 1)
-                ORDER BY boot_priority ASC, id ASC
+                ORDER BY COALESCE(wake_min_battery_charge, 0) ASC, boot_priority ASC, id ASC
                 """
             )
             if not eligible:
@@ -749,8 +977,7 @@ class RecoveryOrchestrator:
                 )
                 return
 
-            # Filter out hosts already online (unless dry_run where we still log simulation)
-            to_wake: list[dict] = []
+            pending_hosts: list[tuple[dict, float]] = []
             for host in eligible:
                 alive = await self.reachability_fn(
                     host["ip_or_host"],
@@ -770,33 +997,65 @@ class RecoveryOrchestrator:
                         (now, now, host["id"]),
                     )
                 else:
+                    req_pct = (
+                        float(host["wake_min_battery_charge"])
+                        if host.get("wake_min_battery_charge") is not None
+                        else cfg.min_battery_charge
+                    )
+                    cur_charge = self._current_battery_charge(cfg.monitored_ups)
+                    initial_state = (
+                        "WAITING_BATTERY"
+                        if (not dry_run and cur_charge is not None and cur_charge < req_pct)
+                        else "WAITING_STAGGER"
+                    )
+                    err_note = (
+                        f"Waiting for battery >= {req_pct:.0f}%"
+                        if initial_state == "WAITING_BATTERY"
+                        else None
+                    )
                     await self.db.execute(
                         """
                         UPDATE hosts
-                        SET wake_state = 'WAITING_STAGGER', wake_attempt = 0,
-                            last_wake_error = NULL, updated_at = ?
+                        SET wake_state = ?, wake_attempt = 0,
+                            last_wake_error = ?, updated_at = ?
                         WHERE id = ?
                         """,
-                        (utc_now_iso(), host["id"]),
+                        (initial_state, err_note, utc_now_iso(), host["id"]),
                     )
-                    to_wake.append(host)
+                    pending_hosts.append((host, req_pct))
 
             await self._broadcast_hosts()
 
-            if to_wake:
-                worker_tasks: list[asyncio.Task[bool]] = []
-                for idx, host in enumerate(to_wake):
-                    if idx > 0:
+            dispatched_count = 0
+            while pending_hosts:
+                cur_charge = self._current_battery_charge(cfg.monitored_ups)
+                ready_indices: list[int] = []
+                for i, (_h, req_pct) in enumerate(pending_hosts):
+                    if dry_run or cur_charge is None or cur_charge >= req_pct:
+                        ready_indices.append(i)
+
+                if not ready_indices:
+                    await asyncio.sleep(self.check_poll_step)
+                    continue
+
+                # Dispatch ready hosts in order with stagger delay
+                for idx_offset, ready_i in enumerate(ready_indices):
+                    host, _ = pending_hosts[ready_i - idx_offset]
+                    pending_hosts.pop(ready_i - idx_offset)
+                    if dispatched_count > 0:
                         delay = max(0, int(host["stagger_delay_sec"]))
                         if dry_run:
                             delay = min(delay, 1)
                         if delay > 0:
                             await asyncio.sleep(float(delay))
+                    dispatched_count += 1
                     task = asyncio.create_task(
                         self._wake_single_host(host, track_retries=True, dry_run=dry_run),
                         name=f"wake-host-{host['id']}",
                     )
                     worker_tasks.append(task)
+
+            if worker_tasks:
                 await asyncio.gather(*worker_tasks)
 
             await self.event_log.record(
@@ -808,6 +1067,9 @@ class RecoveryOrchestrator:
             )
         except asyncio.CancelledError:
             cancelled = True
+            for t in worker_tasks:
+                if not t.done():
+                    t.cancel()
             raise
         finally:
             if not cancelled:

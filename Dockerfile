@@ -15,6 +15,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TZ=UTC \
     WEB_PORT=8765 \
     NUT_PORT=3493 \
+    WEBNUT_INTERNAL_NUT_PORT=3494 \
     WEBNUT_DATA_DIR=/app/data \
     WEBNUT_NUT_DIR=/etc/nut \
     WEBNUT_STATIC_DIR=/app/static \
@@ -24,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nut \
     nut-server \
     nut-client \
+    nut-snmp \
     libnutscan2 \
     libusb-1.0-0 \
     usbutils \

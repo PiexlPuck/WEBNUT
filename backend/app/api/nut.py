@@ -27,14 +27,18 @@ from app.models.schemas import (
     NutConnectionTestRequest,
     NutConnectionTestResponse,
     NutServiceStatus,
+    RepeaterStatusResponse,
+    ScannedSnmpDevice,
     ScannedUsbDevice,
+    SnmpScanRequest,
+    SnmpUpsSetupRequest,
     TelemetrySnapshot,
 )
 from app.nut.client import NutTcpClient
 from app.nut.client_config import detect_local_lan_ip, generate_client_config
 from app.nut.manager import NutConfigApplyError
-from app.nut.parser import parse_nut_conf, parse_ups_conf, parse_upsmon_conf
-from app.nut.scanner import scan_all_hardware, scan_usb_ups
+from app.nut.parser import parse_nut_conf, parse_ups_conf, parse_upsd_conf, parse_upsmon_conf
+from app.nut.scanner import scan_all_hardware, scan_snmp_ups, scan_usb_ups
 
 router = APIRouter(prefix="/api/nut", tags=["nut"])
 
@@ -94,6 +98,93 @@ async def scan_hardware(request: Request) -> HardwareScanResponse:
         },
     )
     return result
+
+
+@router.post("/scan-snmp", response_model=list[ScannedSnmpDevice])
+async def scan_snmp(payload: SnmpScanRequest, request: Request) -> list[ScannedSnmpDevice]:
+    event_log = request.app.state.event_log
+    try:
+        devices = await scan_snmp_ups(
+            start_ip=payload.start_ip,
+            end_ip=payload.end_ip,
+            community=payload.community,
+            snmp_version=payload.snmp_version,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    await event_log.record(
+        "nut_config",
+        "info",
+        "nut_snmp_scan",
+        f"SNMP scan ({payload.start_ip} - {payload.end_ip}) discovered {len(devices)} UPS device(s)",
+        {"count": len(devices)},
+    )
+    return devices
+
+
+@router.post("/setup/snmp")
+async def setup_snmp_ups(payload: SnmpUpsSetupRequest, request: Request) -> dict:
+    """One-page SNMP UPS configurator: saves snmp-ups entry to ups.conf and reloads drivers/upsd."""
+    manager = request.app.state.nut_manager
+    parsed, _ = manager.read_config("ups.conf", mask_secrets=True)
+    ups_list = [u for u in parsed.get("ups_list", []) if u.get("name") != payload.name.strip()]
+
+    directives = [
+        {"key": "mibs", "value": payload.mibs.strip() or "auto"},
+        {"key": "snmp_version", "value": payload.snmp_version},
+        {"key": "pollfreq", "value": str(payload.pollfreq)},
+    ]
+    if payload.snmp_version in ("v1", "v2c"):
+        directives.append({"key": "community", "value": payload.community.strip() or "public"})
+    else:
+        directives.append({"key": "secLevel", "value": payload.sec_level})
+        if payload.sec_name.strip():
+            directives.append({"key": "secName", "value": payload.sec_name.strip()})
+        if payload.sec_level in ("authNoPriv", "authPriv"):
+            directives.append({"key": "authProtocol", "value": payload.auth_protocol})
+            if payload.auth_password:
+                directives.append({"key": "authPassword", "value": payload.auth_password})
+        if payload.sec_level == "authPriv":
+            directives.append({"key": "privProtocol", "value": payload.priv_protocol})
+            if payload.priv_password:
+                directives.append({"key": "privPassword", "value": payload.priv_password})
+
+    ups_list.append(
+        {
+            "name": payload.name.strip(),
+            "driver": "snmp-ups",
+            "port": payload.host.strip(),
+            "desc": payload.desc.strip() or f"SNMP UPS ({payload.host.strip()})",
+            "directives": directives,
+        }
+    )
+    parsed["ups_list"] = ups_list
+
+    try:
+        raw, applied, message = await manager.save_config("ups.conf", parsed, apply_reload=True)
+        conn_row = await _get_connection_row(request.app.state.db)
+        services = await request.app.state.supervisor.get_services_status(
+            external_mode=(conn_row["mode"] == "external")
+        )
+        await request.app.state.ws_hub.broadcast("services", [s.model_dump() for s in services])
+        return {"ok": True, "applied": applied, "message": message, "raw": raw}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except NutConfigApplyError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": exc.message,
+                "stderr": exc.stderr,
+                "rolled_back": exc.rolled_back,
+            },
+        ) from exc
+
+
+@router.get("/repeater", response_model=RepeaterStatusResponse)
+async def get_repeater_status(request: Request) -> RepeaterStatusResponse:
+    repeater = request.app.state.repeater
+    return RepeaterStatusResponse.model_validate(repeater.get_status())
 
 
 @router.get("/config/{filename}", response_model=NutConfigReadResponse)
@@ -216,7 +307,15 @@ async def update_nut_connection(
         else payload.password
     )
     target_host = settings.nut_host if payload.mode == "local" else payload.host.strip()
-    target_port = settings.nut_port if payload.mode == "local" else int(payload.port)
+    if payload.mode == "local":
+        upsd_p = settings.webnut_nut_dir / "upsd.conf"
+        target_port = settings.webnut_internal_nut_port
+        if upsd_p.exists():
+            upsd_cfg = parse_upsd_conf(upsd_p.read_text(encoding="utf-8", errors="replace"))
+            if upsd_cfg.listens:
+                target_port = int(upsd_cfg.listens[0].port)
+    else:
+        target_port = int(payload.port)
     now = utc_now_iso()
 
     await db.execute(
@@ -339,44 +438,62 @@ async def get_nut_clients(request: Request) -> NutClientsOverview:
         if uname and uname not in ups_names_set:
             ups_names_set.append(uname)
 
+    host_rows = await db.fetch_all("SELECT id, name, ip_or_host, virtual_ups_name FROM hosts ORDER BY boot_priority ASC, id ASC")
+    for hr in host_rows:
+        vname = str(hr.get("virtual_ups_name") or "").strip()
+        if vname and vname not in ups_names_set:
+            ups_names_set.append(vname)
+
     available_users = [
         u["username"] for u in users_parsed.get("users", []) if u.get("username")
     ]
 
-    host_rows = await db.fetch_all("SELECT id, name, ip_or_host FROM hosts")
     ip_to_host = {
         str(r["ip_or_host"]).strip(): (int(r["id"]), str(r["name"])) for r in host_rows
     }
 
     connected_clients: list[ConnectedNutClient] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    repeater = getattr(request.app.state, "repeater", None)
+    if repeater is not None:
+        for rc in repeater.get_connected_clients():
+            key = (str(rc["ups_name"]), str(rc["client_ip"]))
+            if key not in seen_pairs:
+                seen_pairs.add(key)
+                matched = ip_to_host.get(key[1])
+                connected_clients.append(
+                    ConnectedNutClient(
+                        ups_name=key[0],
+                        client_ip=key[1],
+                        matched_host_id=matched[0] if matched else None,
+                        matched_host_name=matched[1] if matched else None,
+                    )
+                )
+
     for u in telemetry.get("ups_list", []):
         uname = str(u.get("name", ""))
         for cip in u.get("connected_clients", []) or []:
-            matched = ip_to_host.get(cip)
+            key = (uname, str(cip))
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+            matched = ip_to_host.get(str(cip))
             connected_clients.append(
                 ConnectedNutClient(
                     ups_name=uname,
-                    client_ip=cip,
+                    client_ip=str(cip),
                     matched_host_id=matched[0] if matched else None,
                     matched_host_name=matched[1] if matched else None,
                 )
             )
 
-    conn_row = await _get_connection_row(db)
-    default_ip = (
-        str(conn_row["host"])
-        if conn_row["mode"] == "external"
-        else detect_local_lan_ip()
-    )
-    default_port = (
-        int(conn_row["port"])
-        if conn_row["mode"] == "external"
-        else settings.nut_port
-    )
+    # All LAN clients always connect to WebNUT's Smart NUT Repeater (even when upstream is external)
+    orch_cfg = await orchestrator.get_config()
+    repeater_port = int(orch_cfg.repeater_port) if orch_cfg.repeater_enabled else settings.nut_port
 
     return NutClientsOverview(
-        server_ip=default_ip,
-        nut_port=default_port,
+        server_ip=detect_local_lan_ip(),
+        nut_port=repeater_port,
         ups_names=ups_names_set,
         available_users=available_users,
         connected_clients=connected_clients,

@@ -124,6 +124,48 @@ export interface HardwareScanResponse {
   warnings: string[];
 }
 
+export interface ScannedSnmpDevice {
+  suggested_name: string;
+  driver: string;
+  port: string;
+  mibs: string;
+  community: string;
+  snmp_version: string;
+  desc: string;
+}
+
+export interface SnmpUpsSetupPayload {
+  name: string;
+  host: string;
+  snmp_version: "v1" | "v2c" | "v3";
+  mibs: string;
+  community: string;
+  sec_level: "noAuthNoPriv" | "authNoPriv" | "authPriv";
+  sec_name: string;
+  auth_protocol: "MD5" | "SHA" | "SHA256";
+  auth_password: string;
+  priv_protocol: "DES" | "AES";
+  priv_password: string;
+  desc: string;
+  pollfreq: number;
+}
+
+export interface RepeaterClientSession {
+  ups_name: string;
+  client_ip: string;
+  username: string;
+  connected_at: string;
+}
+
+export interface RepeaterStatusResponse {
+  running: boolean;
+  port: number;
+  error: string | null;
+  mirrored_ups_count: number;
+  virtual_ups_count: number;
+  connected_clients: RepeaterClientSession[];
+}
+
 export interface NutServiceStatus {
   name: string;
   status: "running" | "stopped" | "error" | "unavailable";
@@ -183,10 +225,14 @@ export type NutClientPlatform =
 export type WakeState =
   | "IDLE"
   | "WAITING_STAGGER"
+  | "WAITING_BATTERY"
   | "WAKING"
   | "RETRYING"
   | "WAKE_SUCCEEDED"
   | "WAKE_FAILED";
+
+export type ShutdownMode = "nut_stream" | "ssh" | "both" | "disabled";
+export type HostDisconnectPolicy = "inherit" | "keep_running" | "shutdown_after_grace";
 
 export interface HostPayload {
   name: string;
@@ -206,10 +252,23 @@ export interface HostPayload {
   nut_client_platform: NutClientPlatform;
   nut_ups_name: string;
   nut_client_user: string;
+  virtual_ups_name: string;
+  wake_min_battery_charge: number | null;
+  shutdown_mode: ShutdownMode;
+  shutdown_battery_pct: number | null;
+  shutdown_ob_delay_sec: number | null;
+  disconnect_policy: HostDisconnectPolicy;
+  disconnect_grace_sec: number | null;
+  ssh_port: number;
+  ssh_username: string;
+  ssh_password: string;
+  ssh_sudo_password: string;
+  ssh_shutdown_cmd: string;
 }
 
 export interface HostRecord extends HostPayload {
   id: number;
+  ssh_password_configured: boolean;
   is_online: boolean;
   last_seen_at: string | null;
   was_online_before_outage: boolean;
@@ -218,6 +277,27 @@ export interface HostRecord extends HostPayload {
   last_wake_error: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface SshDeployRequest {
+  ssh_port: number;
+  ssh_username: string;
+  ssh_password: string;
+  ssh_sudo_password: string;
+  save_credentials: boolean;
+  nut_username: string;
+  nut_password: string;
+  final_delay: number;
+  shutdown_cmd: string;
+}
+
+export interface SshDeployResponse {
+  ok: boolean;
+  steps: string[];
+  error: string | null;
+  virtual_ups_name: string;
+  server_host: string;
+  nut_port: number;
 }
 
 export interface ArpLookupResponse {
@@ -235,6 +315,10 @@ export interface OrchestratorConfig {
   host_poll_interval_sec: number;
   ups_poll_interval_sec: number;
   auto_recovery_enabled: boolean;
+  disconnect_policy: "keep_running" | "shutdown_after_grace";
+  disconnect_grace_sec: number;
+  repeater_enabled: boolean;
+  repeater_port: number;
 }
 
 export interface OrchestratorState {
@@ -243,6 +327,8 @@ export interface OrchestratorState {
   outage_started_at: string | null;
   stabilizing_started_at: string | null;
   recovery_started_at: string | null;
+  disconnect_started_at: string | null;
+  disconnect_elapsed_sec: number;
   snapshot_frozen: boolean;
   is_dry_run: boolean;
   stability_remaining_sec: number;

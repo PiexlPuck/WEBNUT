@@ -11,6 +11,7 @@ import {
   EyeOff,
   KeyRound,
   LayoutGrid,
+  LineChart,
   Play,
   Power,
   RefreshCw,
@@ -31,6 +32,8 @@ import type {
   HostRecord,
   IntegrationSettingsView,
   OrchestratorState,
+  PrometheusConfigRequest,
+  PrometheusConfigResponse,
   TelemetrySnapshot,
 } from "../types";
 
@@ -40,7 +43,7 @@ interface IntegrationsPageProps {
   orchestrator: OrchestratorState;
 }
 
-type IntegrationTab = "homepage" | "homeassistant";
+type IntegrationTab = "homepage" | "homeassistant" | "grafana";
 
 const PRESETS: { id: HomepagePreset; label: string; desc: string; defaultDisplay: HomepageDisplayMode }[] = [
   { id: "power", label: "Power & Battery", desc: "Status, Battery, Load, Runtime", defaultDisplay: "block" },
@@ -185,10 +188,12 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
   const [preview, setPreview] = useState<HomepageSummary | null>(null);
   const [generated, setGenerated] = useState<HomepageConfigResponse | null>(null);
   const [haPreview, setHaPreview] = useState<HomeAssistantState | null>(null);
+  const [promGenerated, setPromGenerated] = useState<PrometheusConfigResponse | null>(null);
 
   // Settings form state
   const [homepageEnabled, setHomepageEnabled] = useState(true);
   const [homeassistantEnabled, setHomeassistantEnabled] = useState(true);
+  const [prometheusEnabled, setPrometheusEnabled] = useState(true);
   const [apiKeyEnabled, setApiKeyEnabled] = useState(false);
   const [defaultUps, setDefaultUps] = useState("");
   const [defaultRefreshMs, setDefaultRefreshMs] = useState(10000);
@@ -202,6 +207,8 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [testingHaEndpoint, setTestingHaEndpoint] = useState(false);
   const [haTestResult, setHaTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [testingPromEndpoint, setTestingPromEndpoint] = useState(false);
+  const [promTestResult, setPromTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [feedback, setFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
 
   // Generator form state
@@ -216,6 +223,14 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
     display: "block",
     selected_fields: PRESET_FIELDS.power,
     refresh_interval_ms: 10000,
+    reveal_api_key: false,
+  });
+  const [promForm, setPromForm] = useState<PrometheusConfigRequest>({
+    job_name: "webnut",
+    target_host: "",
+    scheme: "http",
+    scrape_interval_sec: 15,
+    metrics_path: "/metrics",
     reveal_api_key: false,
   });
   const [showFieldPicker, setShowFieldPicker] = useState(false);
@@ -252,6 +267,7 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
       setFields(catalog);
       setHomepageEnabled(cfg.homepage_enabled);
       setHomeassistantEnabled(cfg.homeassistant_enabled);
+      setPrometheusEnabled(cfg.prometheus_enabled);
       setApiKeyEnabled(cfg.api_key_enabled);
       setDefaultUps(cfg.homepage_default_ups);
       setDefaultRefreshMs(cfg.homepage_refresh_ms);
@@ -263,6 +279,18 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
             : cfg.server_url || prev.base_url,
         refresh_interval_ms: cfg.homepage_refresh_ms,
       }));
+      if (cfg.server_url) {
+        try {
+          const parsed = new URL(cfg.server_url);
+          setPromForm((prev) => ({
+            ...prev,
+            target_host: prev.target_host || `${parsed.hostname}:${parsed.port || cfg.web_port}`,
+            scheme: parsed.protocol === "https:" ? "https" : "http",
+          }));
+        } catch {
+          // ignore
+        }
+      }
     } catch (err) {
       setFeedback({
         ok: false,
@@ -297,6 +325,15 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
     }
   }, []);
 
+  const refreshPromPreview = useCallback(async (req: PrometheusConfigRequest) => {
+    try {
+      const payload = await api.generatePrometheusConfig(req);
+      setPromGenerated(payload);
+    } catch {
+      // Keep previous preview if transient error occurs
+    }
+  }, []);
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void refreshPreviewAndYaml(form);
@@ -309,6 +346,14 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
       void refreshHaPreview();
     }
   }, [activeIntegration, refreshHaPreview, telemetry.updated_at, hosts.length, orchestrator.state]);
+
+  useEffect(() => {
+    if (activeIntegration !== "grafana") return;
+    const timer = window.setTimeout(() => {
+      void refreshPromPreview(promForm);
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [activeIntegration, promForm, refreshPromPreview, telemetry.updated_at, hosts.length, orchestrator.state]);
 
   const copyText = async (id: string, text: string) => {
     await navigator.clipboard.writeText(text);
@@ -334,17 +379,23 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
         homepage_default_ups: defaultUps,
         homepage_refresh_ms: defaultRefreshMs,
         homeassistant_enabled: homeassistantEnabled,
+        prometheus_enabled: prometheusEnabled,
       });
       setSettings(updated);
       setApiKeyEnabled(updated.api_key_enabled);
       setHomepageEnabled(updated.homepage_enabled);
       setHomeassistantEnabled(updated.homeassistant_enabled);
+      setPrometheusEnabled(updated.prometheus_enabled);
       if (!updated.api_key_configured) {
         setRevealedKey("");
         setShowKeyText(false);
       }
       setFeedback({ ok: true, msg: "Integration settings saved." });
-      await Promise.all([refreshPreviewAndYaml(form), refreshHaPreview()]);
+      await Promise.all([
+        refreshPreviewAndYaml(form),
+        refreshHaPreview(),
+        refreshPromPreview(promForm),
+      ]);
     } catch (err) {
       setFeedback({
         ok: false,
@@ -413,10 +464,14 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
       setShowKeyText(false);
       setApiKeyEnabled(false);
       setForm((prev) => ({ ...prev, reveal_api_key: false }));
+      setPromForm((prev) => ({ ...prev, reveal_api_key: false }));
       const updated = await api.getIntegrationSettings();
       setSettings(updated);
       setFeedback({ ok: true, msg: "API key revoked and authentication disabled." });
-      await refreshPreviewAndYaml({ ...form, reveal_api_key: false });
+      await Promise.all([
+        refreshPreviewAndYaml({ ...form, reveal_api_key: false }),
+        refreshPromPreview({ ...promForm, reveal_api_key: false }),
+      ]);
     } catch (err) {
       setFeedback({
         ok: false,
@@ -470,6 +525,32 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
       });
     } finally {
       setTestingHaEndpoint(false);
+    }
+  };
+
+  const handleTestPromEndpoint = async () => {
+    setTestingPromEndpoint(true);
+    setPromTestResult(null);
+    const started = performance.now();
+    try {
+      const keyToUse = await resolveApiKeyIfEnabled();
+      const body = await api.testPrometheusMetrics(keyToUse);
+      const ms = Math.round(performance.now() - started);
+      const sampleCount = body
+        .split("\n")
+        .filter((line) => line && !line.startsWith("#")).length;
+      setPromTestResult({
+        ok: true,
+        msg: `HTTP 200 OK (${ms} ms) — ${sampleCount} Prometheus metric sample(s) exposed`,
+      });
+    } catch (err) {
+      const ms = Math.round(performance.now() - started);
+      setPromTestResult({
+        ok: false,
+        msg: `${err instanceof ApiError ? `HTTP ${err.status}: ${err.message}` : "Prometheus /metrics test failed"} (${ms} ms)`,
+      });
+    } finally {
+      setTestingPromEndpoint(false);
     }
   };
 
@@ -547,7 +628,7 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
       )}
 
       {/* Integration Selector Strip */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <button
           type="button"
           onClick={() => setActiveIntegration("homepage")}
@@ -610,6 +691,39 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
               </div>
               <p className="text-xs text-slate-300 mt-1">
                 Custom integration with bundled WebNUT favicon brand icons, UPS sensors, managed hosts &amp; WoL buttons
+              </p>
+            </div>
+          </div>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveIntegration("grafana")}
+          className={`text-left rounded-2xl border p-4 flex items-start justify-between gap-3 transition-colors ${
+            activeIntegration === "grafana"
+              ? "border-indigo-500/60 bg-indigo-500/10"
+              : "border-slate-800 bg-surface-900 hover:border-slate-700"
+          }`}
+        >
+          <div className="flex items-start gap-3">
+            <div className="h-10 w-10 rounded-xl bg-amber-500/15 border border-amber-400/30 flex items-center justify-center text-amber-300 shrink-0">
+              <LineChart className="h-5 w-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-semibold text-white">Grafana &amp; Prometheus</h3>
+                <span
+                  className={`text-[11px] px-2 py-0.5 rounded-full border font-medium ${
+                    prometheusEnabled
+                      ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                      : "bg-slate-800 text-slate-400 border-slate-700"
+                  }`}
+                >
+                  {prometheusEnabled ? "Active" : "Disabled"}
+                </span>
+              </div>
+              <p className="text-xs text-slate-300 mt-1">
+                Prometheus <code className="text-indigo-300">/metrics</code> exposition, scrape config generator &amp; Grafana dashboard JSON
               </p>
             </div>
           </div>
@@ -1046,7 +1160,7 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
             </div>
           </div>
         </>
-      ) : (
+      ) : activeIntegration === "homeassistant" ? (
         <>
           {/* Home Assistant Access & Download Card */}
           <div className="rounded-2xl border border-slate-800 bg-surface-900 p-5 space-y-5">
@@ -1400,6 +1514,282 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
                   </pre>
                 )}
               </div>
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          {/* Prometheus & Grafana Access Card */}
+          <div className="rounded-2xl border border-slate-800 bg-surface-900 p-5 space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
+              <div className="flex items-center gap-2.5">
+                <Shield className="h-5 w-5 text-indigo-400" />
+                <div>
+                  <h3 className="text-base font-semibold text-white">Prometheus &amp; Grafana Access</h3>
+                  <p className="text-xs text-slate-400">
+                    Exposes OpenMetrics telemetry at <code className="text-slate-300">/metrics</code> and{" "}
+                    <code className="text-slate-300">/api/integrations/prometheus/metrics</code>
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <a
+                  href="/api/integrations/grafana/dashboard.json"
+                  download="webnut-grafana-dashboard.json"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/40 text-xs font-medium text-amber-200"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Download Grafana Dashboard JSON
+                </a>
+                <button
+                  onClick={() => void handleTestPromEndpoint()}
+                  disabled={testingPromEndpoint}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-surface-800 hover:bg-surface-700 border border-slate-700 text-xs font-medium text-slate-200 disabled:opacity-50"
+                >
+                  <Play className="h-3.5 w-3.5 text-emerald-400" />
+                  {testingPromEndpoint ? "Testing..." : "Test /metrics Endpoint"}
+                </button>
+                <button
+                  onClick={() => void handleSaveSettings()}
+                  disabled={savingSettings}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white disabled:opacity-50"
+                >
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  {savingSettings ? "Saving..." : "Save Settings"}
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <label className="flex items-start gap-3 p-3.5 rounded-xl bg-surface-950 border border-slate-800 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={prometheusEnabled}
+                  onChange={(e) => setPrometheusEnabled(e.target.checked)}
+                  className="mt-0.5 rounded border-slate-600 bg-surface-900 text-indigo-500"
+                />
+                <div>
+                  <div className="text-sm font-medium text-white">Enable Prometheus /metrics Endpoint</div>
+                  <div className="text-xs text-slate-400 mt-0.5">
+                    Allows Prometheus or Grafana Alloy to scrape UPS, orchestrator, and host metrics
+                  </div>
+                </div>
+              </label>
+
+              <label className="flex items-start gap-3 p-3.5 rounded-xl bg-surface-950 border border-slate-800 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={apiKeyEnabled}
+                  onChange={(e) => setApiKeyEnabled(e.target.checked)}
+                  className="mt-0.5 rounded border-slate-600 bg-surface-900 text-indigo-500"
+                />
+                <div>
+                  <div className="text-sm font-medium text-white">Require API Key (Bearer / X-API-Key)</div>
+                  <div className="text-xs text-slate-400 mt-0.5">
+                    Prometheus scrapes send <code className="text-indigo-300">Authorization: Bearer</code> when enabled
+                  </div>
+                </div>
+              </label>
+            </div>
+
+            <ApiKeyBar
+              settings={settings}
+              revealedKey={revealedKey}
+              showKeyText={showKeyText}
+              keyBusy={keyBusy}
+              copiedId={copiedId}
+              onRotate={() => void handleRotateKey()}
+              onToggleReveal={() => void handleToggleRevealKey()}
+              onCopy={(id, text) => void copyText(id, text)}
+              onRevoke={() => void handleRevokeKey()}
+            />
+
+            {promTestResult && (
+              <div
+                className={`rounded-xl border px-4 py-2.5 text-xs font-mono ${
+                  promTestResult.ok
+                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                    : "border-rose-500/40 bg-rose-500/10 text-rose-300"
+                }`}
+              >
+                {promTestResult.msg}
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
+            {/* Scrape Config Generator */}
+            <div className="xl:col-span-6 rounded-2xl border border-slate-800 bg-surface-900 p-5 space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+                <div>
+                  <h3 className="text-base font-semibold text-white">
+                    <code className="text-indigo-300">prometheus.yml</code> Scrape Config
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Add this job to Prometheus or Grafana Alloy, then import the Grafana dashboard JSON
+                  </p>
+                </div>
+                {promGenerated && (
+                  <button
+                    onClick={() => void copyText("prom_yaml", promGenerated.scrape_yaml)}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white shrink-0"
+                  >
+                    {copiedId === "prom_yaml" ? (
+                      <Check className="h-3.5 w-3.5" />
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                    {copiedId === "prom_yaml" ? "Copied YAML" : "Copy Scrape YAML"}
+                  </button>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">Job Name</label>
+                  <input
+                    type="text"
+                    value={promForm.job_name}
+                    onChange={(e) => setPromForm({ ...promForm, job_name: e.target.value })}
+                    className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-1.5 text-sm text-white font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Target Host (<code className="text-slate-400">ip:port</code>)
+                  </label>
+                  <input
+                    type="text"
+                    value={promForm.target_host}
+                    onChange={(e) => setPromForm({ ...promForm, target_host: e.target.value })}
+                    placeholder="192.168.1.10:8765"
+                    className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-1.5 text-sm text-white font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">Metrics Path</label>
+                  <select
+                    value={promForm.metrics_path}
+                    onChange={(e) =>
+                      setPromForm({
+                        ...promForm,
+                        metrics_path: e.target.value as "/metrics" | "/api/integrations/prometheus/metrics",
+                      })
+                    }
+                    className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-1.5 text-sm text-white font-mono"
+                  >
+                    <option value="/metrics">/metrics</option>
+                    <option value="/api/integrations/prometheus/metrics">
+                      /api/integrations/prometheus/metrics
+                    </option>
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">Scheme</label>
+                    <select
+                      value={promForm.scheme}
+                      onChange={(e) =>
+                        setPromForm({ ...promForm, scheme: e.target.value as "http" | "https" })
+                      }
+                      className="w-full rounded-lg bg-surface-950 border border-slate-700 px-2.5 py-1.5 text-sm text-white"
+                    >
+                      <option value="http">http</option>
+                      <option value="https">https</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">Interval (s)</label>
+                    <input
+                      type="number"
+                      min={5}
+                      max={300}
+                      value={promForm.scrape_interval_sec}
+                      onChange={(e) =>
+                        setPromForm({
+                          ...promForm,
+                          scrape_interval_sec: Number(e.target.value) || 15,
+                        })
+                      }
+                      className="w-full rounded-lg bg-surface-950 border border-slate-700 px-2.5 py-1.5 text-sm text-white"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {settings?.api_key_enabled && (
+                <label className="inline-flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={promForm.reveal_api_key}
+                    onChange={(e) => setPromForm({ ...promForm, reveal_api_key: e.target.checked })}
+                    className="rounded border-slate-600 bg-surface-950 text-indigo-500"
+                  />
+                  Embed actual API key in YAML
+                </label>
+              )}
+
+              {promGenerated && (
+                <pre className="rounded-xl bg-surface-950 border border-slate-800 p-4 text-xs font-mono text-emerald-300 overflow-x-auto leading-relaxed">
+                  {promGenerated.scrape_yaml}
+                </pre>
+              )}
+
+              <div className="rounded-xl bg-surface-950 border border-slate-800 p-4 space-y-2">
+                <div className="text-xs font-semibold text-white">3-Step Grafana Setup</div>
+                <ol className="text-xs text-slate-300 space-y-1.5 list-decimal pl-4">
+                  <li>Add the scrape job above to Prometheus (or Grafana Alloy) and reload its config.</li>
+                  <li>
+                    Click <strong>Download Grafana Dashboard JSON</strong> to save{" "}
+                    <code className="text-indigo-300">webnut-grafana-dashboard.json</code>.
+                  </li>
+                  <li>
+                    In Grafana, open <strong>Dashboards → New → Import</strong>, upload the JSON, and select your
+                    Prometheus datasource.
+                  </li>
+                </ol>
+              </div>
+            </div>
+
+            {/* Live /metrics Preview */}
+            <div className="xl:col-span-6 rounded-2xl border border-slate-800 bg-surface-900 p-5 space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+                <div>
+                  <h3 className="text-base font-semibold text-white">Live <code className="text-indigo-300">/metrics</code> Exposition Preview</h3>
+                  <p className="text-xs text-slate-400">
+                    Real-time Prometheus text format output from your WebNUT instance
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  {promGenerated && (
+                    <span className="text-[11px] px-2 py-0.5 rounded-full border border-slate-700 bg-surface-950 font-mono text-slate-300">
+                      {
+                        promGenerated.sample_metrics
+                          .split("\n")
+                          .filter((l) => l && !l.startsWith("#")).length
+                      }{" "}
+                      samples
+                    </span>
+                  )}
+                  {promGenerated && (
+                    <button
+                      onClick={() => void copyText("prom_sample", promGenerated.sample_metrics)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 border border-slate-700 text-xs text-slate-200"
+                    >
+                      {copiedId === "prom_sample" ? (
+                        <Check className="h-3.5 w-3.5 text-emerald-400" />
+                      ) : (
+                        <Copy className="h-3.5 w-3.5" />
+                      )}
+                      {copiedId === "prom_sample" ? "Copied" : "Copy"}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <pre className="rounded-xl bg-surface-950 border border-slate-800 p-4 text-[11px] font-mono text-slate-300 overflow-x-auto max-h-[34rem] leading-relaxed">
+                {promGenerated?.sample_metrics || "Loading metrics preview..."}
+              </pre>
             </div>
           </div>
         </>

@@ -650,6 +650,7 @@ class IntegrationSettingsView(BaseModel):
     homepage_default_ups: str = ""
     homepage_refresh_ms: int = 10000
     homeassistant_enabled: bool = True
+    prometheus_enabled: bool = True
     instance_id: str = ""
     server_url: str
     web_port: int = 8765
@@ -662,6 +663,7 @@ class IntegrationSettingsUpdateRequest(BaseModel):
     homepage_default_ups: str = Field(default="", max_length=64)
     homepage_refresh_ms: int = Field(default=10000, ge=1000, le=300000)
     homeassistant_enabled: bool = True
+    prometheus_enabled: bool = True
 
 
 class IntegrationApiKeyResponse(BaseModel):
@@ -927,3 +929,22 @@ class HomeAssistantStateResponse(BaseModel):
     ups: list[HomeAssistantUps] = Field(default_factory=list)
     hosts: list[HomeAssistantHost] = Field(default_factory=list)
     updated_at: str
+
+
+# --- Grafana & Prometheus Integration ---
+
+class PrometheusConfigRequest(BaseModel):
+    job_name: str = Field(default="webnut", min_length=1, max_length=64)
+    target_host: str = Field(default="", max_length=255)
+    scheme: Literal["http", "https"] = "http"
+    scrape_interval_sec: int = Field(default=15, ge=5, le=300)
+    metrics_path: Literal["/metrics", "/api/integrations/prometheus/metrics"] = "/metrics"
+    reveal_api_key: bool = False
+
+
+class PrometheusConfigResponse(BaseModel):
+    scrape_yaml: str
+    metrics_url: str
+    requires_api_key: bool
+    sample_metrics: str
+    notes: list[str] = Field(default_factory=list)

@@ -18,6 +18,7 @@ from app.models.schemas import (
     HomepageSummaryResponse,
     OrchestratorConfigModel,
     OrchestratorStateModel,
+    PrometheusConfigRequest,
 )
 
 HOMEPAGE_FIELD_CATALOG: dict[str, HomepageFieldOption] = {
@@ -170,6 +171,7 @@ async def get_integration_settings_row(db: Database) -> dict:
             "homepage_default_ups": "",
             "homepage_refresh_ms": 10000,
             "homeassistant_enabled": 1,
+            "prometheus_enabled": 1,
             "instance_id": "",
             "updated_at": utc_now_iso(),
         }
@@ -556,3 +558,500 @@ def build_homeassistant_state(
         hosts=host_models,
         updated_at=str(telemetry.get("updated_at") or utc_now_iso()),
     )
+
+
+def _prom_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _prom_labels(pairs: list[tuple[str, str]]) -> str:
+    if not pairs:
+        return ""
+    inner = ",".join(f'{k}="{_prom_escape(v)}"' for k, v in pairs)
+    return "{" + inner + "}"
+
+
+def _prom_gauge(
+    lines: list[str],
+    name: str,
+    help_text: str,
+    samples: list[tuple[list[tuple[str, str]], float | int]],
+) -> None:
+    if not samples:
+        return
+    lines.append(f"# HELP {name} {help_text}")
+    lines.append(f"# TYPE {name} gauge")
+    for labels, val in samples:
+        lines.append(f"{name}{_prom_labels(labels)} {val}")
+
+
+def build_prometheus_metrics(state: HomeAssistantStateResponse) -> str:
+    """Render Prometheus/OpenMetrics text exposition for WebNUT UPS, orchestrator, and hosts."""
+    lines: list[str] = []
+
+    _prom_gauge(
+        lines,
+        "webnut_info",
+        "Static metadata about the WebNUT instance",
+        [([("version", state.version), ("instance_id", state.instance_id)], 1)],
+    )
+    _prom_gauge(
+        lines,
+        "webnut_ups_connected",
+        "1 if WebNUT is receiving live telemetry from upsd",
+        [([], 1 if state.connected else 0)],
+    )
+    _prom_gauge(
+        lines,
+        "webnut_repeater_running",
+        "1 if the built-in Smart NUT Repeater is listening",
+        [([], 1 if state.repeater_running else 0)],
+    )
+    _prom_gauge(
+        lines,
+        "webnut_clients_connected",
+        "Number of connected NUT clients across repeater and upstream upsd",
+        [([], state.clients_connected)],
+    )
+    _prom_gauge(
+        lines,
+        "webnut_hosts_online",
+        "Number of managed hosts currently online",
+        [([], state.hosts_online)],
+    )
+    _prom_gauge(
+        lines,
+        "webnut_hosts_total",
+        "Total number of managed hosts configured in WebNUT",
+        [([], state.hosts_total)],
+    )
+
+    active_orch = state.orchestrator.state.lower()
+    _prom_gauge(
+        lines,
+        "webnut_orchestrator_state",
+        "Active power recovery orchestrator state (1 for current state)",
+        [
+            ([("state", s)], 1 if s == active_orch else 0)
+            for s in ("normal", "on_battery", "stabilizing", "recovering")
+        ],
+    )
+    _prom_gauge(
+        lines,
+        "webnut_orchestrator_stability_remaining_seconds",
+        "Remaining stability hold countdown in seconds before WoL recovery",
+        [([], state.orchestrator.stability_remaining_sec)],
+    )
+    _prom_gauge(
+        lines,
+        "webnut_orchestrator_disconnect_elapsed_seconds",
+        "Elapsed UPS communications disconnect time in seconds",
+        [([], state.orchestrator.disconnect_elapsed_sec)],
+    )
+
+    if state.ups:
+        _prom_gauge(
+            lines,
+            "webnut_ups_up",
+            "1 if UPS telemetry is connected and available",
+            [
+                (
+                    [
+                        ("ups", u.name),
+                        ("model", f"{u.manufacturer} {u.model}".strip() or u.description),
+                    ],
+                    1 if state.connected else 0,
+                )
+                for u in state.ups
+            ],
+        )
+        _prom_gauge(
+            lines,
+            "webnut_ups_on_battery",
+            "1 when the UPS is running on battery (OB)",
+            [([("ups", u.name)], 1 if u.on_battery else 0) for u in state.ups],
+        )
+        _prom_gauge(
+            lines,
+            "webnut_ups_low_battery",
+            "1 when the UPS reports low battery (LB)",
+            [([("ups", u.name)], 1 if u.low_battery else 0) for u in state.ups],
+        )
+        _prom_gauge(
+            lines,
+            "webnut_ups_battery_charge_percent",
+            "UPS battery charge percentage",
+            [
+                ([("ups", u.name)], u.battery_charge)
+                for u in state.ups
+                if u.battery_charge is not None
+            ],
+        )
+        _prom_gauge(
+            lines,
+            "webnut_ups_battery_runtime_seconds",
+            "Estimated UPS battery runtime remaining in seconds",
+            [
+                ([("ups", u.name)], u.battery_runtime)
+                for u in state.ups
+                if u.battery_runtime is not None
+            ],
+        )
+        _prom_gauge(
+            lines,
+            "webnut_ups_battery_voltage_volts",
+            "UPS battery DC voltage in volts",
+            [
+                ([("ups", u.name)], u.battery_voltage)
+                for u in state.ups
+                if u.battery_voltage is not None
+            ],
+        )
+        _prom_gauge(
+            lines,
+            "webnut_ups_load_percent",
+            "UPS output load percentage",
+            [
+                ([("ups", u.name)], u.ups_load)
+                for u in state.ups
+                if u.ups_load is not None
+            ],
+        )
+        _prom_gauge(
+            lines,
+            "webnut_ups_realpower_watts",
+            "UPS active power output in watts",
+            [
+                ([("ups", u.name)], u.realpower_watts)
+                for u in state.ups
+                if u.realpower_watts is not None
+            ],
+        )
+        _prom_gauge(
+            lines,
+            "webnut_ups_input_voltage_volts",
+            "UPS input utility voltage in volts",
+            [
+                ([("ups", u.name)], u.input_voltage)
+                for u in state.ups
+                if u.input_voltage is not None
+            ],
+        )
+        _prom_gauge(
+            lines,
+            "webnut_ups_output_voltage_volts",
+            "UPS output voltage in volts",
+            [
+                ([("ups", u.name)], u.output_voltage)
+                for u in state.ups
+                if u.output_voltage is not None
+            ],
+        )
+
+    if state.hosts:
+        _prom_gauge(
+            lines,
+            "webnut_host_online",
+            "1 if managed host is currently reachable",
+            [
+                ([("host", h.name), ("ip", h.ip_or_host)], 1 if h.is_online else 0)
+                for h in state.hosts
+            ],
+        )
+        _prom_gauge(
+            lines,
+            "webnut_host_wake_state",
+            "Current Wake-on-LAN recovery state for each managed host",
+            [
+                (
+                    [
+                        ("host", h.name),
+                        ("ip", h.ip_or_host),
+                        ("state", h.wake_state.lower()),
+                    ],
+                    1,
+                )
+                for h in state.hosts
+            ],
+        )
+
+    return "\n".join(lines) + "\n"
+
+
+def _normalize_scrape_target(raw: str, fallback: str) -> str:
+    cleaned = _validate_single_line(raw, "target_host") if raw.strip() else fallback
+    for prefix in ("http://", "https://"):
+        if cleaned.lower().startswith(prefix):
+            cleaned = cleaned[len(prefix) :]
+            break
+    cleaned = cleaned.rstrip("/").split("/", 1)[0]
+    if not cleaned:
+        raise ValueError("target_host cannot be empty")
+    return cleaned
+
+
+def render_prometheus_scrape_yaml(
+    req: PrometheusConfigRequest,
+    default_target: str,
+    api_key_enabled: bool,
+    api_key_value: str = "",
+) -> tuple[str, str, list[str]]:
+    """Render a `prometheus.yml` scrape_configs snippet for WebNUT."""
+    job_name = _validate_single_line(req.job_name, "job_name")
+    if not job_name:
+        raise ValueError("job_name cannot be empty")
+    target = _normalize_scrape_target(req.target_host, default_target)
+    metrics_url = f"{req.scheme}://{target}{req.metrics_path}"
+
+    lines = [
+        "scrape_configs:",
+        f"  - job_name: {_yaml_quote(job_name)}",
+        f"    scrape_interval: {req.scrape_interval_sec}s",
+        f"    metrics_path: {req.metrics_path}",
+        f"    scheme: {req.scheme}",
+    ]
+    if api_key_enabled:
+        secret = api_key_value if (req.reveal_api_key and api_key_value) else "YOUR_WEBNUT_API_KEY"
+        lines.extend(
+            [
+                "    authorization:",
+                "      type: Bearer",
+                f"      credentials: {_yaml_quote(secret)}",
+            ]
+        )
+    lines.extend(
+        [
+            "    static_configs:",
+            f"      - targets: [{_yaml_quote(target)}]",
+        ]
+    )
+
+    notes = [
+        "Add this job under `scrape_configs:` in your `prometheus.yml` (or configure Grafana Alloy / Prometheus scrape).",
+        "Import the downloadable Grafana Dashboard JSON in Grafana under Dashboards → New → Import.",
+    ]
+    if api_key_enabled and not (req.reveal_api_key and api_key_value):
+        notes.append(
+            "API key auth is enabled — replace YOUR_WEBNUT_API_KEY (or check 'Embed actual API key in YAML') before reloading Prometheus."
+        )
+    return "\n".join(lines) + "\n", metrics_url, notes
+
+
+def build_grafana_dashboard_json() -> dict:
+    """Return a ready-to-import Grafana dashboard JSON for WebNUT Prometheus metrics."""
+    ds_ref = {"type": "prometheus", "uid": "${datasource}"}
+
+    def _stat_panel(
+        pid: int,
+        title: str,
+        expr: str,
+        unit: str,
+        x: int,
+        w: int = 4,
+        mappings: list | None = None,
+        thresholds: list | None = None,
+    ) -> dict:
+        defaults: dict = {
+            "unit": unit,
+            "thresholds": {
+                "mode": "absolute",
+                "steps": thresholds or [{"color": "green", "value": None}],
+            },
+        }
+        if mappings:
+            defaults["mappings"] = mappings
+        return {
+            "id": pid,
+            "type": "stat",
+            "title": title,
+            "datasource": ds_ref,
+            "gridPos": {"h": 4, "w": w, "x": x, "y": 0},
+            "targets": [{"refId": "A", "expr": expr, "instant": True}],
+            "fieldConfig": {"defaults": defaults, "overrides": []},
+            "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
+            },
+        }
+
+    def _timeseries_panel(
+        pid: int,
+        title: str,
+        targets: list[tuple[str, str, str]],
+        unit: str,
+        x: int,
+        y: int,
+        w: int = 12,
+        h: int = 8,
+    ) -> dict:
+        return {
+            "id": pid,
+            "type": "timeseries",
+            "title": title,
+            "datasource": ds_ref,
+            "gridPos": {"h": h, "w": w, "x": x, "y": y},
+            "targets": [
+                {"refId": ref, "expr": expr, "legendFormat": legend}
+                for ref, expr, legend in targets
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": unit,
+                    "custom": {"lineWidth": 2, "fillOpacity": 15},
+                },
+                "overrides": [],
+            },
+            "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+        }
+
+    return {
+        "__inputs": [
+            {
+                "name": "DS_PROMETHEUS",
+                "label": "Prometheus",
+                "description": "Prometheus datasource scraping WebNUT /metrics",
+                "type": "datasource",
+                "pluginId": "prometheus",
+                "pluginName": "Prometheus",
+            }
+        ],
+        "__requires": [
+            {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0"},
+            {"type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0"},
+            {"type": "panel", "id": "stat", "name": "Stat", "version": ""},
+            {"type": "panel", "id": "timeseries", "name": "Time series", "version": ""},
+        ],
+        "id": None,
+        "uid": "webnut-power-overview",
+        "title": "WebNUT — UPS & Power Orchestrator",
+        "tags": ["webnut", "ups", "nut", "power"],
+        "timezone": "browser",
+        "schemaVersion": 39,
+        "version": 1,
+        "refresh": "15s",
+        "time": {"from": "now-6h", "to": "now"},
+        "templating": {
+            "list": [
+                {
+                    "name": "datasource",
+                    "type": "datasource",
+                    "query": "prometheus",
+                    "current": {},
+                    "hide": 0,
+                    "label": "Datasource",
+                },
+                {
+                    "name": "ups",
+                    "type": "query",
+                    "datasource": ds_ref,
+                    "query": "label_values(webnut_ups_up, ups)",
+                    "refresh": 1,
+                    "includeAll": False,
+                    "multi": False,
+                    "label": "UPS",
+                },
+            ]
+        },
+        "panels": [
+            _stat_panel(
+                1,
+                "Power State",
+                'webnut_ups_on_battery{ups="$ups"}',
+                "none",
+                0,
+                mappings=[
+                    {
+                        "type": "value",
+                        "options": {
+                            "0": {"text": "Online", "color": "green"},
+                            "1": {"text": "On Battery", "color": "orange"},
+                        },
+                    }
+                ],
+                thresholds=[{"color": "green", "value": None}, {"color": "orange", "value": 1}],
+            ),
+            _stat_panel(
+                2,
+                "Battery Charge",
+                'webnut_ups_battery_charge_percent{ups="$ups"}',
+                "percent",
+                4,
+                thresholds=[
+                    {"color": "red", "value": None},
+                    {"color": "orange", "value": 30},
+                    {"color": "green", "value": 60},
+                ],
+            ),
+            _stat_panel(
+                3,
+                "UPS Load",
+                'webnut_ups_load_percent{ups="$ups"}',
+                "percent",
+                8,
+                thresholds=[
+                    {"color": "green", "value": None},
+                    {"color": "orange", "value": 70},
+                    {"color": "red", "value": 90},
+                ],
+            ),
+            _stat_panel(4, "Active Power", 'webnut_ups_realpower_watts{ups="$ups"}', "watt", 12),
+            _stat_panel(5, "Est. Runtime", 'webnut_ups_battery_runtime_seconds{ups="$ups"}', "s", 16),
+            _stat_panel(6, "Hosts Online", "webnut_hosts_online", "short", 20),
+            _timeseries_panel(
+                7,
+                "Battery Charge & Runtime",
+                [
+                    ("A", 'webnut_ups_battery_charge_percent{ups="$ups"}', "Battery %"),
+                    ("B", 'webnut_ups_battery_runtime_seconds{ups="$ups"} / 60', "Runtime (min)"),
+                ],
+                "short",
+                0,
+                4,
+            ),
+            _timeseries_panel(
+                8,
+                "UPS Load & Active Power",
+                [
+                    ("A", 'webnut_ups_load_percent{ups="$ups"}', "Load %"),
+                    ("B", 'webnut_ups_realpower_watts{ups="$ups"}', "Power (W)"),
+                ],
+                "short",
+                12,
+                4,
+            ),
+            _timeseries_panel(
+                9,
+                "Input, Output & Battery Voltage",
+                [
+                    ("A", 'webnut_ups_input_voltage_volts{ups="$ups"}', "Input (V)"),
+                    ("B", 'webnut_ups_output_voltage_volts{ups="$ups"}', "Output (V)"),
+                    ("C", 'webnut_ups_battery_voltage_volts{ups="$ups"}', "Battery (V)"),
+                ],
+                "volt",
+                0,
+                12,
+            ),
+            _timeseries_panel(
+                10,
+                "Orchestrator State & Connected NUT Clients",
+                [
+                    ("A", "webnut_orchestrator_state", "State: {{state}}"),
+                    ("B", "webnut_clients_connected", "Connected NUT Clients"),
+                ],
+                "short",
+                12,
+                12,
+            ),
+            _timeseries_panel(
+                11,
+                "Managed Hosts Online Status",
+                [("A", "webnut_host_online", "{{host}} ({{ip}})")],
+                "short",
+                0,
+                20,
+                w=24,
+                h=7,
+            ),
+        ],
+    }

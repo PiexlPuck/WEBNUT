@@ -29,6 +29,8 @@ import type {
   NutServiceStatus,
   OrchestratorConfig,
   OrchestratorState,
+  PrometheusConfigRequest,
+  PrometheusConfigResponse,
   PushoverConfigPayload,
   PushoverConfigView,
   RecordedClientConfigDetail,
@@ -321,6 +323,30 @@ export const api = {
     return request<HomeAssistantInfo>("/api/integrations/homeassistant/info", {
       headers,
     });
+  },
+  generatePrometheusConfig: (payload: PrometheusConfigRequest) =>
+    request<PrometheusConfigResponse>("/api/integrations/prometheus/generate", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  testPrometheusMetrics: async (apiKey = "") => {
+    const headers: Record<string, string> = {};
+    if (apiKey.trim()) {
+      headers.Authorization = `Bearer ${apiKey.trim()}`;
+    }
+    const res = await fetch("/api/integrations/prometheus/metrics", { headers });
+    const text = await res.text();
+    if (!res.ok) {
+      let msg = `HTTP ${res.status}`;
+      try {
+        const parsed = JSON.parse(text) as { detail?: string };
+        if (parsed?.detail) msg = parsed.detail;
+      } catch {
+        // keep HTTP status message
+      }
+      throw new ApiError(msg, res.status, text);
+    }
+    return text;
   },
 
   // UPS Control & Self-Test Scheduler

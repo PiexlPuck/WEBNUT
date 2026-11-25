@@ -6,14 +6,14 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.control import router as control_router
 from app.api.events import router as events_router
 from app.api.hosts import router as hosts_router
-from app.api.integrations import router as integrations_router
+from app.api.integrations import get_prometheus_metrics, router as integrations_router
 from app.api.notifications import router as notifications_router
 from app.api.nut import router as nut_router
 from app.api.orchestrator import router as orchestrator_router
@@ -193,6 +193,15 @@ app.include_router(control_router)
 @app.get("/api/health")
 async def health_check() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics_root(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> PlainTextResponse:
+    return await get_prometheus_metrics(request, x_api_key=x_api_key, authorization=authorization)
 
 
 @app.websocket("/ws/live")

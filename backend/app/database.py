@@ -482,6 +482,22 @@ class Database:
             )
             await self.conn.commit()
 
+        if 11 not in applied:
+            now = utc_now_iso()
+            cols = {
+                r["name"]
+                for r in await self.fetch_all("PRAGMA table_info(integration_settings)")
+            }
+            if "prometheus_enabled" not in cols:
+                await self.conn.execute(
+                    "ALTER TABLE integration_settings ADD COLUMN prometheus_enabled INTEGER NOT NULL DEFAULT 1"
+                )
+            await self.conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (11, ?)",
+                (now,),
+            )
+            await self.conn.commit()
+
     async def fetch_one(self, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
         cur = await self.conn.execute(sql, params)
         row = await cur.fetchone()

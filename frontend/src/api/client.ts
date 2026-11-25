@@ -4,6 +4,8 @@ import type {
   CreateSecondaryUserResponse,
   EventLogPage,
   HardwareScanResponse,
+  HomeAssistantInfo,
+  HomeAssistantState,
   HomepageConfigRequest,
   HomepageConfigResponse,
   HomepageFieldOption,
@@ -32,12 +34,19 @@ import type {
   RecordedClientConfigDetail,
   RecordedClientConfigSummary,
   RepeaterStatusResponse,
+  RunUpsCommandResponse,
   ScannedSnmpDevice,
   ScannedUsbDevice,
+  SelfTestReportRecord,
+  SelfTestReportsResponse,
+  SelfTestSchedulePayload,
+  SelfTestScheduleRecord,
+  SetUpsVarResponse,
   SnmpUpsSetupPayload,
   SshDeployRequest,
   SshDeployResponse,
   TelemetrySnapshot,
+  UpsCapabilitiesResponse,
 } from "../types";
 
 export class ApiError extends Error {
@@ -302,4 +311,68 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  getHomeAssistantPreview: () =>
+    request<HomeAssistantState>("/api/integrations/homeassistant/preview"),
+  testHomeAssistantInfo: (apiKey = "") => {
+    const headers: Record<string, string> = {};
+    if (apiKey.trim()) {
+      headers["X-API-Key"] = apiKey.trim();
+    }
+    return request<HomeAssistantInfo>("/api/integrations/homeassistant/info", {
+      headers,
+    });
+  },
+
+  // UPS Control & Self-Test Scheduler
+  getUpsCapabilities: (upsName: string) =>
+    request<UpsCapabilitiesResponse>(
+      `/api/control/${encodeURIComponent(upsName)}/capabilities`
+    ),
+  runUpsCommand: (upsName: string, command: string, confirmDangerous = false) =>
+    request<RunUpsCommandResponse>(`/api/control/${encodeURIComponent(upsName)}/command`, {
+      method: "POST",
+      body: JSON.stringify({ command, confirm_dangerous: confirmDangerous }),
+    }),
+  setUpsVar: (upsName: string, varName: string, value: string) =>
+    request<SetUpsVarResponse>(`/api/control/${encodeURIComponent(upsName)}/var`, {
+      method: "POST",
+      body: JSON.stringify({ var_name: varName, value }),
+    }),
+  getSelfTestSchedules: () =>
+    request<SelfTestScheduleRecord[]>("/api/control/schedules"),
+  createSelfTestSchedule: (payload: SelfTestSchedulePayload) =>
+    request<SelfTestScheduleRecord>("/api/control/schedules", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateSelfTestSchedule: (id: number, payload: SelfTestSchedulePayload) =>
+    request<SelfTestScheduleRecord>(`/api/control/schedules/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+  deleteSelfTestSchedule: (id: number) =>
+    request<{ deleted: boolean; id: number }>(`/api/control/schedules/${id}`, {
+      method: "DELETE",
+    }),
+  runSelfTestScheduleNow: (id: number) =>
+    request<SelfTestReportRecord>(`/api/control/schedules/${id}/run-now`, {
+      method: "POST",
+    }),
+  getSelfTestReports: (upsName?: string, limit = 100) => {
+    const qs = new URLSearchParams();
+    if (upsName) qs.set("ups_name", upsName);
+    if (limit) qs.set("limit", String(limit));
+    const q = qs.toString();
+    return request<SelfTestReportsResponse>(`/api/control/reports${q ? `?${q}` : ""}`);
+  },
+  deleteSelfTestReport: (id: number) =>
+    request<{ deleted: boolean; id: number }>(`/api/control/reports/${id}`, {
+      method: "DELETE",
+    }),
+  clearSelfTestReports: (upsName?: string) => {
+    const qs = upsName ? `?ups_name=${encodeURIComponent(upsName)}` : "";
+    return request<{ cleared: number }>(`/api/control/reports${qs}`, {
+      method: "DELETE",
+    });
+  },
 };

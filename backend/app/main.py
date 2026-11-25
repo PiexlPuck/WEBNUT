@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api.control import router as control_router
 from app.api.events import router as events_router
 from app.api.hosts import router as hosts_router
 from app.api.integrations import router as integrations_router
@@ -27,6 +28,7 @@ from app.nut.repeater import NutRepeaterServer
 from app.nut.supervisor import NutSupervisor
 from app.services.crypto import SecretBox
 from app.services.event_log import EventLogService
+from app.services.selftest_scheduler import SelfTestScheduler
 from app.services.version_checker import VersionChecker, read_local_version
 from app.services.ws_hub import WebSocketHub
 from app.wol.monitor import HostMonitor
@@ -115,6 +117,15 @@ async def lifespan(app: FastAPI):
         check_interval_sec=settings.webnut_update_check_interval_sec,
         version_file=settings.webnut_version_file,
     )
+    selftest_scheduler = SelfTestScheduler(
+        db,
+        nut_client,
+        nut_manager,
+        orchestrator,
+        dispatcher,
+        event_log,
+        ws_hub=ws_hub,
+    )
 
     app.state.db = db
     app.state.ws_hub = ws_hub
@@ -128,6 +139,7 @@ async def lifespan(app: FastAPI):
     app.state.host_monitor = host_monitor
     app.state.orchestrator = orchestrator
     app.state.version_checker = version_checker
+    app.state.selftest_scheduler = selftest_scheduler
 
     if not is_external:
         try:
@@ -141,6 +153,7 @@ async def lifespan(app: FastAPI):
     host_monitor.start()
     orchestrator.start()
     version_checker.start()
+    selftest_scheduler.start()
 
     await event_log.record(
         "system",
@@ -153,6 +166,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await selftest_scheduler.stop()
         await version_checker.stop()
         await orchestrator.stop()
         await host_monitor.stop()
@@ -173,6 +187,7 @@ app.include_router(notifications_router)
 app.include_router(events_router)
 app.include_router(system_router)
 app.include_router(integrations_router)
+app.include_router(control_router)
 
 
 @app.get("/api/health")

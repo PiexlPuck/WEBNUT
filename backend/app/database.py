@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,8 @@ DEFAULT_NOTIFICATION_RULES: list[tuple[str, int, int]] = [
     ("host_wake_retrying", 1, 1),
     ("host_wake_failed", 1, 2),
     ("app_update_available", 1, 0),
+    ("ups_selftest_completed", 1, 0),
+    ("ups_selftest_failed", 1, 1),
 ]
 
 
@@ -384,6 +387,97 @@ class Database:
             )
             await self.conn.execute(
                 "INSERT INTO schema_migrations (version, applied_at) VALUES (8, ?)",
+                (now,),
+            )
+            await self.conn.commit()
+
+        if 9 not in applied:
+            now = utc_now_iso()
+            await self.conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS ups_selftest_schedules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ups_name TEXT NOT NULL,
+                    test_command TEXT NOT NULL DEFAULT 'test.battery.start.quick',
+                    frequency TEXT NOT NULL DEFAULT 'weekly',
+                    day_of_week INTEGER NOT NULL DEFAULT 0,
+                    day_of_month INTEGER NOT NULL DEFAULT 1,
+                    time_hhmm TEXT NOT NULL DEFAULT '03:00',
+                    min_battery_pct REAL NOT NULL DEFAULT 80.0,
+                    require_online INTEGER NOT NULL DEFAULT 1,
+                    notify_on_complete INTEGER NOT NULL DEFAULT 1,
+                    notify_on_fail INTEGER NOT NULL DEFAULT 1,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    last_run_at TEXT,
+                    next_run_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS ups_selftest_reports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    schedule_id INTEGER,
+                    ups_name TEXT NOT NULL,
+                    test_command TEXT NOT NULL,
+                    trigger_type TEXT NOT NULL DEFAULT 'manual',
+                    status TEXT NOT NULL DEFAULT 'running',
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    duration_sec INTEGER,
+                    battery_before REAL,
+                    battery_after REAL,
+                    runtime_before REAL,
+                    runtime_after REAL,
+                    load_pct REAL,
+                    ups_test_result TEXT NOT NULL DEFAULT '',
+                    message TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY (schedule_id) REFERENCES ups_selftest_schedules(id) ON DELETE SET NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_selftest_reports_started_at
+                    ON ups_selftest_reports(started_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_selftest_reports_ups
+                    ON ups_selftest_reports(ups_name);
+                """
+            )
+            for event_type, enabled, priority in (
+                ("ups_selftest_completed", 1, 0),
+                ("ups_selftest_failed", 1, 1),
+            ):
+                await self.conn.execute(
+                    """
+                    INSERT OR IGNORE INTO notification_rules (
+                        event_type, enabled, priority, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (event_type, enabled, priority, now),
+                )
+            await self.conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (9, ?)",
+                (now,),
+            )
+            await self.conn.commit()
+
+        if 10 not in applied:
+            now = utc_now_iso()
+            cols = {
+                r["name"]
+                for r in await self.fetch_all("PRAGMA table_info(integration_settings)")
+            }
+            if "homeassistant_enabled" not in cols:
+                await self.conn.execute(
+                    "ALTER TABLE integration_settings ADD COLUMN homeassistant_enabled INTEGER NOT NULL DEFAULT 1"
+                )
+            if "instance_id" not in cols:
+                await self.conn.execute(
+                    "ALTER TABLE integration_settings ADD COLUMN instance_id TEXT NOT NULL DEFAULT ''"
+                )
+            await self.conn.execute(
+                "UPDATE integration_settings SET instance_id = ? WHERE id = 1 AND instance_id = ''",
+                (secrets.token_hex(8),),
+            )
+            await self.conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (10, ?)",
                 (now,),
             )
             await self.conn.commit()

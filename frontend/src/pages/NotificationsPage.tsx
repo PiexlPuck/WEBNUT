@@ -40,6 +40,14 @@ const EVENT_LABELS: Record<string, { label: string; desc: string }> = {
     label: "WEBNUT Update Available",
     desc: "Sent once when a newer WEBNUT version is published on GitHub",
   },
+  ups_selftest_completed: {
+    label: "UPS Self-Test Completed",
+    desc: "Scheduled or manual UPS battery self-test finished with pass or warning",
+  },
+  ups_selftest_failed: {
+    label: "UPS Self-Test Failed",
+    desc: "UPS battery self-test failed, aborted, or could not run",
+  },
 };
 
 const PRIORITIES = [

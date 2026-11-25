@@ -1,0 +1,141 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to WebNUT",
+        "description": "Enter your WebNUT server connection details.",
+        "data": {
+          "host": "Host or IP address",
+          "port": "Web UI / API port",
+          "api_key": "API key (optional unless enabled in WebNUT)",
+          "use_ssl": "Use HTTPS",
+          "verify_ssl": "Verify SSL certificate"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate WebNUT",
+        "description": "The API key for WebNUT ({host}) was rejected. Enter the updated API key.",
+        "data": {
+          "api_key": "API key"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to WebNUT. Check host, port, and network access.",
+      "invalid_auth": "Invalid or missing WebNUT API key.",
+      "ha_disabled": "Home Assistant endpoints are disabled in WebNUT Integrations settings.",
+      "unknown": "Unexpected error communicating with WebNUT."
+    },
+    "abort": {
+      "already_configured": "This WebNUT instance is already configured.",
+      "reauth_successful": "Reauthentication succeeded.",
+      "wrong_instance": "The connected server belongs to a different WebNUT instance."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "WebNUT Options",
+        "description": "Configure how often Home Assistant polls WebNUT.",
+        "data": {
+          "scan_interval": "Polling interval (seconds)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "ups_status": {
+        "name": "Status"
+      },
+      "ups_status_flags": {
+        "name": "Status flags"
+      },
+      "battery_charge": {
+        "name": "Battery charge"
+      },
+      "battery_runtime": {
+        "name": "Battery runtime"
+      },
+      "battery_voltage": {
+        "name": "Battery voltage"
+      },
+      "ups_load": {
+        "name": "Load"
+      },
+      "ups_power": {
+        "name": "Power"
+      },
+      "input_voltage": {
+        "name": "Input voltage"
+      },
+      "output_voltage": {
+        "name": "Output voltage"
+      },
+      "orchestrator_state": {
+        "name": "Orchestrator state",
+        "state": {
+          "normal": "Normal",
+          "on_battery": "On battery",
+          "stabilizing": "Stabilizing",
+          "recovering": "Recovering"
+        }
+      },
+      "hosts_online": {
+        "name": "Hosts online"
+      },
+      "hosts_total": {
+        "name": "Managed hosts"
+      },
+      "clients_connected": {
+        "name": "Connected NUT clients"
+      },
+      "stability_remaining": {
+        "name": "Stability hold remaining"
+      },
+      "disconnect_elapsed": {
+        "name": "UPS disconnect elapsed"
+      },
+      "version": {
+        "name": "Version"
+      },
+      "wake_state": {
+        "name": "Wake state",
+        "state": {
+          "idle": "Idle",
+          "waiting_stagger": "Waiting stagger",
+          "waiting_battery": "Waiting battery",
+          "waking": "Waking",
+          "retrying": "Retrying",
+          "wake_succeeded": "Wake succeeded",
+          "wake_failed": "Wake failed"
+        }
+      }
+    },
+    "binary_sensor": {
+      "on_battery": {
+        "name": "On battery"
+      },
+      "low_battery": {
+        "name": "Low battery"
+      },
+      "ups_connected": {
+        "name": "UPS connected"
+      },
+      "repeater_running": {
+        "name": "NUT repeater running"
+      },
+      "update_available": {
+        "name": "Update available"
+      },
+      "host_online": {
+        "name": "Online"
+      }
+    },
+    "button": {
+      "wake": {
+        "name": "Wake host"
+      }
+    }
+  }
+}

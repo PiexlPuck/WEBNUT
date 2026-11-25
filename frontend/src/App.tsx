@@ -9,6 +9,7 @@ import { IntegrationsPage } from "./pages/IntegrationsPage";
 import { NotificationsPage } from "./pages/NotificationsPage";
 import { NutClientsPage } from "./pages/NutClientsPage";
 import { NutConfigPage } from "./pages/NutConfigPage";
+import { UpsControlPage } from "./pages/UpsControlPage";
 
 export function App() {
   const [activeTab, setActiveTab] = useState<NavTab>("dashboard");
@@ -70,6 +71,12 @@ export function App() {
         {activeTab === "nut" && (
           <NutConfigPage
             services={live.services}
+            telemetry={live.telemetry}
+            onRefresh={live.refreshAll}
+          />
+        )}
+        {activeTab === "control" && (
+          <UpsControlPage
             telemetry={live.telemetry}
             onRefresh={live.refreshAll}
           />

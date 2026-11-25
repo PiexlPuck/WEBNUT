@@ -649,7 +649,10 @@ class IntegrationSettingsView(BaseModel):
     homepage_enabled: bool
     homepage_default_ups: str = ""
     homepage_refresh_ms: int = 10000
+    homeassistant_enabled: bool = True
+    instance_id: str = ""
     server_url: str
+    web_port: int = 8765
     ups_names: list[str] = Field(default_factory=list)
 
 
@@ -658,6 +661,7 @@ class IntegrationSettingsUpdateRequest(BaseModel):
     homepage_enabled: bool = True
     homepage_default_ups: str = Field(default="", max_length=64)
     homepage_refresh_ms: int = Field(default=10000, ge=1000, le=300000)
+    homeassistant_enabled: bool = True
 
 
 class IntegrationApiKeyResponse(BaseModel):
@@ -723,3 +727,203 @@ class HomepageConfigResponse(BaseModel):
     mappings: list[HomepageFieldOption]
     sample_payload: HomepageSummaryResponse
     notes: list[str] = Field(default_factory=list)
+
+
+# --- UPS Control & Self-Test Scheduler Models ---
+
+class UpsCommandInfo(BaseModel):
+    name: str
+    description: str = ""
+    risk: Literal["safe", "dangerous"] = "safe"
+    category: Literal["selftest", "beeper", "calibration", "power", "other"] = "other"
+
+
+class UpsWritableVarInfo(BaseModel):
+    name: str
+    value: str = ""
+    description: str = ""
+    var_type: str = ""
+    enum_values: list[str] = Field(default_factory=list)
+    range_min: float | None = None
+    range_max: float | None = None
+
+
+class UpsCapabilitiesResponse(BaseModel):
+    ups_name: str
+    commands: list[UpsCommandInfo] = Field(default_factory=list)
+    writable_vars: list[UpsWritableVarInfo] = Field(default_factory=list)
+    credentials_configured: bool = False
+    credential_source: str = "none"
+
+
+class RunUpsCommandRequest(BaseModel):
+    command: str = Field(min_length=1, max_length=128)
+    confirm_dangerous: bool = False
+
+
+class RunUpsCommandResponse(BaseModel):
+    ok: bool
+    ups_name: str
+    command: str
+    message: str
+    report_id: int | None = None
+
+
+class SetUpsVarRequest(BaseModel):
+    var_name: str = Field(min_length=1, max_length=128)
+    value: str = Field(max_length=256)
+
+
+class SetUpsVarResponse(BaseModel):
+    ok: bool
+    ups_name: str
+    var_name: str
+    value: str
+    message: str
+
+
+SelfTestFrequency = Literal["daily", "weekly", "biweekly", "monthly"]
+
+
+class SelfTestScheduleCreate(BaseModel):
+    ups_name: str = Field(min_length=1, max_length=64)
+    test_command: str = Field(default="test.battery.start.quick", min_length=1, max_length=128)
+    frequency: SelfTestFrequency = "weekly"
+    day_of_week: int = Field(default=0, ge=0, le=6)
+    day_of_month: int = Field(default=1, ge=1, le=31)
+    time_hhmm: str = Field(default="03:00", pattern=r"^\d{2}:\d{2}$")
+    min_battery_pct: float = Field(default=80.0, ge=0.0, le=100.0)
+    require_online: bool = True
+    notify_on_complete: bool = True
+    notify_on_fail: bool = True
+    enabled: bool = True
+
+    @field_validator("time_hhmm")
+    @classmethod
+    def _validate_time_hhmm(cls, value: str) -> str:
+        hh_str, mm_str = value.split(":", 1)
+        hh, mm = int(hh_str), int(mm_str)
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            raise ValueError("time_hhmm must be a valid 24-hour HH:MM time (00:00 - 23:59)")
+        return value
+
+
+class SelfTestScheduleRecord(BaseModel):
+    id: int
+    ups_name: str
+    test_command: str
+    frequency: SelfTestFrequency
+    day_of_week: int
+    day_of_month: int
+    time_hhmm: str
+    min_battery_pct: float
+    require_online: bool
+    notify_on_complete: bool
+    notify_on_fail: bool
+    enabled: bool
+    last_run_at: str | None = None
+    next_run_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class SelfTestReportRecord(BaseModel):
+    id: int
+    schedule_id: int | None = None
+    ups_name: str
+    test_command: str
+    trigger_type: str
+    status: str
+    started_at: str
+    completed_at: str | None = None
+    duration_sec: int | None = None
+    battery_before: float | None = None
+    battery_after: float | None = None
+    runtime_before: float | None = None
+    runtime_after: float | None = None
+    load_pct: float | None = None
+    ups_test_result: str = ""
+    message: str = ""
+
+
+class SelfTestReportsSummary(BaseModel):
+    total: int = 0
+    passed: int = 0
+    failed: int = 0
+    warning: int = 0
+    skipped: int = 0
+    running: int = 0
+    pass_rate_pct: float | None = None
+    last_passed_at: str | None = None
+    avg_battery_drop: float | None = None
+
+
+class SelfTestReportsResponse(BaseModel):
+    summary: SelfTestReportsSummary
+    reports: list[SelfTestReportRecord] = Field(default_factory=list)
+
+
+# --- Home Assistant Integration ---
+
+class HomeAssistantInfoResponse(BaseModel):
+    instance_id: str
+    name: str = "WebNUT"
+    version: str
+    server_url: str
+    api_key_required: bool
+    homeassistant_enabled: bool
+
+
+class HomeAssistantUps(BaseModel):
+    name: str
+    description: str = ""
+    manufacturer: str = ""
+    model: str = ""
+    status: str = "UNKNOWN"
+    status_label: str = "Unknown"
+    on_battery: bool = False
+    low_battery: bool = False
+    battery_charge: float | None = None
+    battery_runtime: int | None = None
+    battery_voltage: float | None = None
+    ups_load: float | None = None
+    input_voltage: float | None = None
+    output_voltage: float | None = None
+    realpower_watts: float | None = None
+
+
+class HomeAssistantHost(BaseModel):
+    id: int
+    name: str
+    ip_or_host: str
+    enabled: bool
+    is_online: bool
+    wake_state: str
+    last_seen_at: str | None = None
+    virtual_ups_name: str = ""
+
+
+class HomeAssistantOrchestrator(BaseModel):
+    state: str
+    state_label: str
+    last_ups_status: str
+    stability_remaining_sec: int = 0
+    disconnect_elapsed_sec: int = 0
+    auto_recovery_enabled: bool = True
+
+
+class HomeAssistantStateResponse(BaseModel):
+    instance_id: str
+    version: str
+    latest_version: str | None = None
+    update_available: bool = False
+    connected: bool
+    error: str | None = None
+    orchestrator: HomeAssistantOrchestrator
+    repeater_running: bool
+    clients_connected: int
+    hosts_online: int
+    hosts_total: int
+    ups: list[HomeAssistantUps] = Field(default_factory=list)
+    hosts: list[HomeAssistantHost] = Field(default_factory=list)
+    updated_at: str

@@ -8,6 +8,10 @@ from urllib.parse import quote
 
 from app.database import Database, utc_now_iso
 from app.models.schemas import (
+    HomeAssistantHost,
+    HomeAssistantOrchestrator,
+    HomeAssistantStateResponse,
+    HomeAssistantUps,
     HomepageConfigRequest,
     HomepageDisplayMode,
     HomepageFieldOption,
@@ -165,6 +169,8 @@ async def get_integration_settings_row(db: Database) -> dict:
             "homepage_enabled": 1,
             "homepage_default_ups": "",
             "homepage_refresh_ms": 10000,
+            "homeassistant_enabled": 1,
+            "instance_id": "",
             "updated_at": utc_now_iso(),
         }
     return row
@@ -459,3 +465,94 @@ def render_homepage_yaml(
         )
 
     return "\n".join(lines) + "\n", endpoint_url, mappings, display, notes
+
+
+def _ups_manufacturer_model(ups: dict) -> tuple[str, str]:
+    mfr = str(ups.get("ups_mfr") or "").strip()
+    model = str(ups.get("ups_model") or "").strip()
+    return mfr, model
+
+
+def build_homeassistant_state(
+    instance_id: str,
+    version: str,
+    latest_version: str | None,
+    update_available: bool,
+    telemetry: dict,
+    orch_state: OrchestratorStateModel,
+    orch_cfg: OrchestratorConfigModel,
+    hosts: list[dict],
+    repeater_status: dict | None = None,
+) -> HomeAssistantStateResponse:
+    """Build the full Home Assistant coordinator payload (all UPS units + managed hosts)."""
+    ups_list = list(telemetry.get("ups_list") or [])
+    connected = bool(telemetry.get("connected"))
+
+    ups_models: list[HomeAssistantUps] = []
+    for u in ups_list:
+        name = str(u.get("name") or "").strip()
+        if not name:
+            continue
+        raw_vars = dict(u.get("raw_vars") or {})
+        status_str = str(u.get("status") or "UNKNOWN").strip() or "UNKNOWN"
+        tokens = set(u.get("status_tokens") or status_str.split())
+        load = _to_float(u.get("ups_load"))
+        runtime = _to_float(u.get("battery_runtime"))
+        mfr, model = _ups_manufacturer_model(u)
+        ups_models.append(
+            HomeAssistantUps(
+                name=name,
+                description=str(u.get("description") or ""),
+                manufacturer=mfr,
+                model=model,
+                status=status_str,
+                status_label=_format_ups_status_label(connected, status_str, tokens),
+                on_battery="OB" in tokens,
+                low_battery="LB" in tokens,
+                battery_charge=_to_float(u.get("battery_charge")),
+                battery_runtime=int(round(runtime)) if runtime is not None else None,
+                battery_voltage=_to_float(raw_vars.get("battery.voltage")),
+                ups_load=load,
+                input_voltage=_to_float(u.get("input_voltage")),
+                output_voltage=_to_float(u.get("output_voltage")),
+                realpower_watts=_compute_realpower_watts(raw_vars, load),
+            )
+        )
+
+    host_models = [
+        HomeAssistantHost(
+            id=int(h["id"]),
+            name=str(h.get("name") or f"host_{h['id']}"),
+            ip_or_host=str(h.get("ip_or_host") or ""),
+            enabled=bool(h.get("enabled", 1)),
+            is_online=bool(h.get("is_online")),
+            wake_state=str(h.get("wake_state") or "IDLE"),
+            last_seen_at=h.get("last_seen_at"),
+            virtual_ups_name=str(h.get("virtual_ups_name") or ""),
+        )
+        for h in hosts
+    ]
+
+    return HomeAssistantStateResponse(
+        instance_id=instance_id,
+        version=version,
+        latest_version=latest_version,
+        update_available=update_available,
+        connected=connected,
+        error=telemetry.get("error"),
+        orchestrator=HomeAssistantOrchestrator(
+            state=orch_state.state,
+            state_label=_ORCH_LABELS.get(orch_state.state, orch_state.state.title()),
+            last_ups_status=orch_state.last_ups_status,
+            stability_remaining_sec=orch_state.stability_remaining_sec,
+            disconnect_elapsed_sec=orch_state.disconnect_elapsed_sec,
+            auto_recovery_enabled=orch_cfg.auto_recovery_enabled,
+        ),
+        repeater_running=bool(repeater_status and repeater_status.get("running")),
+        clients_connected=_count_connected_clients(ups_list, repeater_status),
+        hosts_online=sum(1 for h in host_models if h.is_online),
+        hosts_total=len(host_models),
+        ups=ups_models,
+        hosts=host_models,
+        updated_at=str(telemetry.get("updated_at") or utc_now_iso()),
+    )

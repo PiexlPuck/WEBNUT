@@ -527,7 +527,10 @@ export interface IntegrationSettingsView {
   homepage_enabled: boolean;
   homepage_default_ups: string;
   homepage_refresh_ms: number;
+  homeassistant_enabled: boolean;
+  instance_id: string;
   server_url: string;
+  web_port: number;
   ups_names: string[];
 }
 
@@ -536,6 +539,8 @@ export interface IntegrationSettingsUpdatePayload {
   homepage_enabled: boolean;
   homepage_default_ups: string;
   homepage_refresh_ms: number;
+  homeassistant_enabled?: boolean;
+  homeassistant_enabled: boolean;
 }
 
 export interface IntegrationApiKeyResponse {
@@ -601,4 +606,172 @@ export interface HomepageConfigResponse {
   mappings: HomepageFieldOption[];
   sample_payload: HomepageSummary;
   notes: string[];
+}
+
+export interface HomeAssistantInfo {
+  instance_id: string;
+  name: string;
+  version: string;
+  server_url: string;
+  api_key_required: boolean;
+  homeassistant_enabled: boolean;
+}
+
+export interface HomeAssistantUps {
+  name: string;
+  description: string;
+  manufacturer: string;
+  model: string;
+  status: string;
+  status_label: string;
+  on_battery: boolean;
+  low_battery: boolean;
+  battery_charge: number | null;
+  battery_runtime: number | null;
+  battery_voltage: number | null;
+  ups_load: number | null;
+  input_voltage: number | null;
+  output_voltage: number | null;
+  realpower_watts: number | null;
+}
+
+export interface HomeAssistantHost {
+  id: number;
+  name: string;
+  ip_or_host: string;
+  enabled: boolean;
+  is_online: boolean;
+  wake_state: string;
+  last_seen_at: string | null;
+  virtual_ups_name: string;
+}
+
+export interface HomeAssistantOrchestrator {
+  state: string;
+  state_label: string;
+  last_ups_status: string;
+  stability_remaining_sec: number;
+  disconnect_elapsed_sec: number;
+  auto_recovery_enabled: boolean;
+}
+
+export interface HomeAssistantState {
+  instance_id: string;
+  version: string;
+  latest_version: string | null;
+  update_available: boolean;
+  connected: boolean;
+  error: string | null;
+  orchestrator: HomeAssistantOrchestrator;
+  repeater_running: boolean;
+  clients_connected: number;
+  hosts_online: number;
+  hosts_total: number;
+  ups: HomeAssistantUps[];
+  hosts: HomeAssistantHost[];
+  updated_at: string;
+}
+
+export type UpsCommandRisk = "safe" | "dangerous";
+export type UpsCommandCategory = "selftest" | "beeper" | "calibration" | "power" | "other";
+
+export interface UpsCommandInfo {
+  name: string;
+  description: string;
+  risk: UpsCommandRisk;
+  category: UpsCommandCategory;
+}
+
+export interface UpsWritableVarInfo {
+  name: string;
+  value: string;
+  description: string;
+  var_type: string;
+  enum_values: string[];
+  range_min: number | null;
+  range_max: number | null;
+}
+
+export interface UpsCapabilitiesResponse {
+  ups_name: string;
+  commands: UpsCommandInfo[];
+  writable_vars: UpsWritableVarInfo[];
+  credentials_configured: boolean;
+  credential_source: string;
+}
+
+export interface RunUpsCommandResponse {
+  ok: boolean;
+  ups_name: string;
+  command: string;
+  message: string;
+  report_id: number | null;
+}
+
+export interface SetUpsVarResponse {
+  ok: boolean;
+  ups_name: string;
+  var_name: string;
+  value: string;
+  message: string;
+}
+
+export type SelfTestFrequency = "daily" | "weekly" | "biweekly" | "monthly";
+
+export interface SelfTestSchedulePayload {
+  ups_name: string;
+  test_command: string;
+  frequency: SelfTestFrequency;
+  day_of_week: number;
+  day_of_month: number;
+  time_hhmm: string;
+  min_battery_pct: number;
+  require_online: boolean;
+  notify_on_complete: boolean;
+  notify_on_fail: boolean;
+  enabled: boolean;
+}
+
+export interface SelfTestScheduleRecord extends SelfTestSchedulePayload {
+  id: number;
+  last_run_at: string | null;
+  next_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SelfTestReportRecord {
+  id: number;
+  schedule_id: number | null;
+  ups_name: string;
+  test_command: string;
+  trigger_type: string;
+  status: "running" | "passed" | "failed" | "warning" | "skipped" | string;
+  started_at: string;
+  completed_at: string | null;
+  duration_sec: number | null;
+  battery_before: number | null;
+  battery_after: number | null;
+  runtime_before: number | null;
+  runtime_after: number | null;
+  load_pct: number | null;
+  ups_test_result: string;
+  message: string;
+}
+
+export interface SelfTestReportsSummary {
+  total: number;
+  passed: number;
+  failed: number;
+  warning: number;
+  skipped: number;
+  running: number;
+  pass_rate_pct: number | null;
+  last_passed_at: string | null;
+  avg_battery_drop: number | null;
+}
+
+export interface SelfTestReportsResponse {
+  summary: SelfTestReportsSummary;
+  reports: SelfTestReportRecord[];
 }

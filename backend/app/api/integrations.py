@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import io
+import zipfile
+from pathlib import Path
+
 from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi.responses import Response
 
 from app.config import settings
 from app.database import utc_now_iso
 from app.models.schemas import (
+    HomeAssistantInfoResponse,
+    HomeAssistantStateResponse,
     HomepageConfigRequest,
     HomepageConfigResponse,
     HomepageFieldOption,
@@ -18,6 +25,7 @@ from app.models.schemas import (
 from app.nut.client_config import detect_local_lan_ip
 from app.services.integrations import (
     HOMEPAGE_FIELD_CATALOG,
+    build_homeassistant_state,
     build_homepage_summary,
     generate_integration_api_key,
     get_integration_settings_row,
@@ -66,7 +74,10 @@ async def _build_settings_view(request: Request) -> IntegrationSettingsView:
         homepage_enabled=bool(row.get("homepage_enabled", 1)),
         homepage_default_ups=str(row.get("homepage_default_ups") or ""),
         homepage_refresh_ms=int(row.get("homepage_refresh_ms") or 10000),
+        homeassistant_enabled=bool(row.get("homeassistant_enabled", 1)),
+        instance_id=str(row.get("instance_id") or ""),
         server_url=server_url,
+        web_port=settings.web_port,
         ups_names=_collect_ups_names(request),
     )
 
@@ -101,6 +112,23 @@ def _extract_bearer_or_api_key(x_api_key: str | None, authorization: str | None)
     return None
 
 
+def _enforce_api_key(
+    request: Request,
+    row: dict,
+    x_api_key: str | None,
+    authorization: str | None,
+) -> None:
+    """Raise 401 when integration API key auth is enabled and the request key is missing/invalid."""
+    if not (bool(row.get("api_key_enabled")) and row.get("api_key_enc")):
+        return
+    stored_key = request.app.state.secret_box.decrypt(str(row["api_key_enc"]))
+    if not stored_key:
+        return
+    provided = _extract_bearer_or_api_key(x_api_key, authorization)
+    if not verify_api_key(provided, stored_key):
+        raise HTTPException(status_code=401, detail="Invalid or missing WebNUT API key")
+
+
 @router.get("/settings", response_model=IntegrationSettingsView)
 async def get_integration_settings(request: Request) -> IntegrationSettingsView:
     return await _build_settings_view(request)
@@ -125,14 +153,15 @@ async def update_integration_settings(
         """
         INSERT INTO integration_settings (
             id, api_key_enabled, api_key_enc, homepage_enabled,
-            homepage_default_ups, homepage_refresh_ms, updated_at
-        ) VALUES (1, ?, ?, ?, ?, ?, ?)
+            homepage_default_ups, homepage_refresh_ms, homeassistant_enabled, updated_at
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             api_key_enabled = excluded.api_key_enabled,
             api_key_enc = excluded.api_key_enc,
             homepage_enabled = excluded.homepage_enabled,
             homepage_default_ups = excluded.homepage_default_ups,
             homepage_refresh_ms = excluded.homepage_refresh_ms,
+            homeassistant_enabled = excluded.homeassistant_enabled,
             updated_at = excluded.updated_at
         """,
         (
@@ -141,6 +170,7 @@ async def update_integration_settings(
             1 if payload.homepage_enabled else 0,
             payload.homepage_default_ups.strip(),
             payload.homepage_refresh_ms,
+            1 if payload.homeassistant_enabled else 0,
             now,
         ),
     )
@@ -151,9 +181,10 @@ async def update_integration_settings(
             "integrations",
             "info",
             "integration_settings_updated",
-            "Updated Homepage & external integration settings",
+            "Updated Homepage, Home Assistant & external integration settings",
             {
                 "homepage_enabled": payload.homepage_enabled,
+                "homeassistant_enabled": payload.homeassistant_enabled,
                 "api_key_enabled": payload.api_key_enabled,
                 "homepage_default_ups": payload.homepage_default_ups.strip(),
                 "homepage_refresh_ms": payload.homepage_refresh_ms,
@@ -260,7 +291,6 @@ async def get_homepage_summary(
     authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> HomepageSummaryResponse:
     db = request.app.state.db
-    secret_box = request.app.state.secret_box
     row = await get_integration_settings_row(db)
 
     if not bool(row.get("homepage_enabled", 1)):
@@ -269,12 +299,7 @@ async def get_homepage_summary(
             detail="Homepage widget endpoint is disabled in WebNUT Integrations settings",
         )
 
-    if bool(row.get("api_key_enabled")) and row.get("api_key_enc"):
-        stored_key = secret_box.decrypt(str(row["api_key_enc"]))
-        if stored_key:
-            provided = _extract_bearer_or_api_key(x_api_key, authorization)
-            if not verify_api_key(provided, stored_key):
-                raise HTTPException(status_code=401, detail="Invalid or missing WebNUT API key")
+    _enforce_api_key(request, row, x_api_key, authorization)
 
     return await _compute_summary(
         request,
@@ -332,4 +357,146 @@ async def generate_homepage_config(
         mappings=mappings,
         sample_payload=sample_payload,
         notes=notes,
+    )
+
+
+# --- Home Assistant ---
+
+_HA_DISABLED_DETAIL = "Home Assistant integration endpoints are disabled in WebNUT Integrations settings"
+
+
+async def _require_homeassistant(
+    request: Request,
+    x_api_key: str | None,
+    authorization: str | None,
+) -> dict:
+    row = await get_integration_settings_row(request.app.state.db)
+    if not bool(row.get("homeassistant_enabled", 1)):
+        raise HTTPException(status_code=403, detail=_HA_DISABLED_DETAIL)
+    _enforce_api_key(request, row, x_api_key, authorization)
+    return row
+
+
+async def _version_info(request: Request) -> tuple[str, str | None, bool]:
+    checker = getattr(request.app.state, "version_checker", None)
+    if checker is not None:
+        try:
+            status = await checker.get_status()
+            return status.current_version, status.latest_version, bool(status.update_available)
+        except Exception:
+            pass
+    from app.services.version_checker import read_local_version
+
+    return read_local_version(settings.webnut_version_file), None, False
+
+
+async def _compute_homeassistant_state(request: Request, row: dict) -> HomeAssistantStateResponse:
+    orchestrator = request.app.state.orchestrator
+    db = request.app.state.db
+    repeater = getattr(request.app.state, "repeater", None)
+    version, latest, update_available = await _version_info(request)
+    return build_homeassistant_state(
+        instance_id=str(row.get("instance_id") or ""),
+        version=version,
+        latest_version=latest,
+        update_available=update_available,
+        telemetry=orchestrator.latest_telemetry,
+        orch_state=await orchestrator.get_state(),
+        orch_cfg=await orchestrator.get_config(),
+        hosts=await db.fetch_all("SELECT * FROM hosts ORDER BY boot_priority ASC, id ASC"),
+        repeater_status=repeater.get_status() if repeater is not None else None,
+    )
+
+
+@router.get("/homeassistant/info", response_model=HomeAssistantInfoResponse)
+async def get_homeassistant_info(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> HomeAssistantInfoResponse:
+    """Used by the Home Assistant config flow to validate connectivity, API key, and unique ID."""
+    row = await _require_homeassistant(request, x_api_key, authorization)
+    version, _, _ = await _version_info(request)
+    return HomeAssistantInfoResponse(
+        instance_id=str(row.get("instance_id") or ""),
+        version=version,
+        server_url=f"http://{detect_local_lan_ip()}:{settings.web_port}",
+        api_key_required=bool(row.get("api_key_enabled")) and bool(row.get("api_key_enc")),
+        homeassistant_enabled=True,
+    )
+
+
+@router.get("/homeassistant/state", response_model=HomeAssistantStateResponse)
+async def get_homeassistant_state(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> HomeAssistantStateResponse:
+    """Full coordinator payload polled by the Home Assistant WebNUT integration."""
+    row = await _require_homeassistant(request, x_api_key, authorization)
+    return await _compute_homeassistant_state(request, row)
+
+
+@router.get("/homeassistant/preview", response_model=HomeAssistantStateResponse)
+async def preview_homeassistant_state(request: Request) -> HomeAssistantStateResponse:
+    """Same payload as /state for the WebNUT UI preview (no API key required)."""
+    row = await get_integration_settings_row(request.app.state.db)
+    return await _compute_homeassistant_state(request, row)
+
+
+@router.post("/homeassistant/hosts/{host_id}/wake")
+async def homeassistant_wake_host(
+    host_id: int,
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> dict:
+    """Trigger a tracked Wake-on-LAN sequence for a managed host from Home Assistant."""
+    await _require_homeassistant(request, x_api_key, authorization)
+    orchestrator = request.app.state.orchestrator
+    try:
+        await orchestrator.manual_wake_host(host_id, track_retries=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    event_log = getattr(request.app.state, "event_log", None)
+    if event_log is not None:
+        await event_log.record(
+            "integrations",
+            "info",
+            "homeassistant_wake_host",
+            f"Home Assistant requested Wake-on-LAN for host #{host_id}",
+            {"host_id": host_id},
+        )
+    return {"started": True, "host_id": host_id}
+
+
+def _resolve_ha_component_dir() -> Path | None:
+    candidates = [
+        settings.webnut_ha_component_dir,
+        Path(__file__).resolve().parents[3] / "custom_components" / "webnut",
+    ]
+    for c in candidates:
+        if (c / "manifest.json").is_file():
+            return c
+    return None
+
+
+@router.get("/homeassistant/package.zip")
+async def download_homeassistant_package() -> Response:
+    """Download the WebNUT Home Assistant custom integration (extract into /config)."""
+    comp_dir = _resolve_ha_component_dir()
+    if comp_dir is None:
+        raise HTTPException(status_code=404, detail="Home Assistant integration package not found")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in sorted(comp_dir.rglob("*")):
+            if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
+                continue
+            arcname = Path("custom_components") / "webnut" / path.relative_to(comp_dir)
+            zf.write(path, arcname.as_posix())
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="webnut-homeassistant.zip"'},
     )

@@ -9,15 +9,24 @@ import { IntegrationsPage } from "./pages/IntegrationsPage";
 import { NotificationsPage } from "./pages/NotificationsPage";
 import { NutClientsPage } from "./pages/NutClientsPage";
 import { NutConfigPage } from "./pages/NutConfigPage";
+import { RecordedConfigsPage } from "./pages/RecordedConfigsPage";
 import { UpsControlPage } from "./pages/UpsControlPage";
+import type { RecordedClientConfigSummary } from "./types";
 
 export function App() {
   const [activeTab, setActiveTab] = useState<NavTab>("dashboard");
   const [clientSetupHostId, setClientSetupHostId] = useState<number | null>(null);
+  const [selectedRecordedConfig, setSelectedRecordedConfig] =
+    useState<RecordedClientConfigSummary | null>(null);
   const live = useLiveTelemetry();
 
   const openNutClientSetup = (hostId: number) => {
     setClientSetupHostId(hostId);
+    setActiveTab("clients");
+  };
+
+  const handleLoadRecordedConfig = (rec: RecordedClientConfigSummary) => {
+    setSelectedRecordedConfig(rec);
     setActiveTab("clients");
   };
 
@@ -59,6 +68,15 @@ export function App() {
             telemetry={live.telemetry}
             preselectedHostId={clientSetupHostId}
             onClearPreselectedHost={() => setClientSetupHostId(null)}
+            preselectedConfig={selectedRecordedConfig}
+            onClearPreselectedConfig={() => setSelectedRecordedConfig(null)}
+            onOpenSavedConfigs={() => setActiveTab("recorded_configs")}
+          />
+        )}
+        {activeTab === "recorded_configs" && (
+          <RecordedConfigsPage
+            onLoadInClientSetup={handleLoadRecordedConfig}
+            onNavigateClientSetup={() => setActiveTab("clients")}
           />
         )}
         {activeTab === "integrations" && (

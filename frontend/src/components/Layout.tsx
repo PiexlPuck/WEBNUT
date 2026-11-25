@@ -6,6 +6,7 @@ import {
   Check,
   Copy,
   FileText,
+  FolderArchive,
   LayoutGrid,
   Link2,
   Power,
@@ -29,6 +30,7 @@ export type NavTab =
   | "dashboard"
   | "hosts"
   | "clients"
+  | "recorded_configs"
   | "integrations"
   | "nut"
   | "control"
@@ -54,6 +56,7 @@ const NAV_ITEMS: { id: NavTab; label: string; icon: typeof Activity }[] = [
   { id: "control", label: "UPS Control", icon: Sliders },
   { id: "hosts", label: "Managed Hosts", icon: Server },
   { id: "clients", label: "Client Setup", icon: Link2 },
+  { id: "recorded_configs", label: "Saved Configs", icon: FolderArchive },
   { id: "integrations", label: "Integrations", icon: LayoutGrid },
   { id: "notifications", label: "Alerts", icon: Bell },
   { id: "events", label: "Activity Log", icon: FileText },
@@ -119,7 +122,7 @@ export function Layout({
               className="lg:hidden inline-flex items-center gap-1 px-2 py-0.5 rounded bg-surface-800 hover:bg-surface-700 border border-slate-700/80 text-[11px] text-slate-300 disabled:opacity-50"
             >
               <RefreshCw className={`h-3 w-3 ${checkingUpdates ? "animate-spin" : ""}`} />
-              <span>v{versionStatus?.current_version ?? "2.2.2"}</span>
+              <span>v{versionStatus?.current_version ?? "2.2.3"}</span>
             </button>
             <span
               title={wsConnected ? "Live WebSocket Connected" : "Reconnecting..."}
@@ -194,7 +197,7 @@ export function Layout({
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5">
                 <span className="text-slate-400 font-mono">
-                  v{versionStatus?.current_version ?? "2.2.2"}
+                  v{versionStatus?.current_version ?? "2.2.3"}
                 </span>
                 {versionStatus?.update_available && (
                   <span

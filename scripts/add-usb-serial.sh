@@ -307,120 +307,155 @@ configure_serial_node() {
   ADDED_COUNT=$((ADDED_COUNT + 1))
 }
 
-resolve_compose_dir
-ADDED_COUNT=0
+list_connected_usb_ups() {
+  if ! command -v lsusb >/dev/null 2>&1; then
+    return 1
+  fi
+  local usb_lines=""
+  usb_lines="$(lsusb 2>/dev/null || true)"
+  if [ -z "$usb_lines" ]; then
+    return 1
+  fi
+  local matches=""
+  matches="$(printf "%s\n" "$usb_lines" | grep -iE 'UPS|APC|American Power Conversion|CyberPower|Eaton|Tripp ?Lite|MGE|Liebert|PowerCOM|Riello|051d:|0764:|0463:|09ae:|050d:|10af:|0d9f:' || true)"
+  if [ -n "$matches" ]; then
+    echo ""
+    echo "Detected USB HID / Direct USB UPS device(s) on host:"
+    while IFS= read -r line; do
+      [ -n "$line" ] && echo "  * $line"
+    done <<< "$matches"
+    echo "  -> No /dev/ttyUSB* serial mapping needed: /dev/bus/usb is already passed through in docker-compose.yml."
+    echo "  -> In WebNUT UI, open 'UPS Setup -> Scan Hardware (USB & Serial)' to add it."
+    return 0
+  fi
+  return 1
+}
 
-echo ""
-echo "=========================================================="
-echo "  WEBNUT USB & USB-Serial UPS Passthrough Wizard"
-echo "=========================================================="
-echo "Compose directory: $COMPOSE_DIR"
-echo ""
+main() {
+  resolve_compose_dir
+  ADDED_COUNT=0
 
-while true; do
-  local_mode=""
-  echo "To accurately detect your USB or USB-Serial adapter:"
-  read_tty "Make sure the UPS USB/Serial cable is UNPLUGGED, then press [Enter] (or [S] to list already-connected devices): " local_mode
+  echo ""
+  echo "=========================================================="
+  echo "  WEBNUT USB & USB-Serial UPS Passthrough Wizard"
+  echo "=========================================================="
+  echo "Compose directory: $COMPOSE_DIR"
+  echo ""
 
-  if [ "${local_mode:-}" = "s" ] || [ "${local_mode:-}" = "S" ]; then
-    mapfile -t existing_ttys < <(snapshot_tty_devices)
-    if [ "${#existing_ttys[@]}" -eq 0 ]; then
-      echo "No /dev/ttyUSB* or /dev/ttyACM* devices currently found."
-      echo "If you have a standard USB HID UPS (non-serial), /dev/bus/usb is already passed through in docker-compose.yml."
+  while true; do
+    local scan_mode=""
+    echo "To accurately detect your USB or USB-Serial adapter:"
+    read_tty "Make sure the UPS USB/Serial cable is UNPLUGGED, then press [Enter] (or [S] to list already-connected devices): " scan_mode
+
+    if [ "${scan_mode:-}" = "s" ] || [ "${scan_mode:-}" = "S" ]; then
+      mapfile -t existing_ttys < <(snapshot_tty_devices)
+      if [ "${#existing_ttys[@]}" -eq 0 ]; then
+        echo "No /dev/ttyUSB* or /dev/ttyACM* serial devices currently found."
+        if ! list_connected_usb_ups; then
+          echo "If you have a standard USB HID UPS (non-serial), /dev/bus/usb is already passed through in docker-compose.yml."
+        fi
+      else
+        echo ""
+        echo "Currently connected serial devices:"
+        local idx=1
+        for t in "${existing_ttys[@]}"; do
+          local bid=""
+          bid="$(find_by_id_for_tty "$t" || true)"
+          echo "  [$idx] $t ${bid:+(by-id: $bid)}"
+          idx=$((idx + 1))
+        done
+        local pick=""
+        read_tty "Select device number to add (or [0] to cancel): " pick
+        if [[ "${pick:-0}" =~ ^[0-9]+$ ]] && [ "$pick" -ge 1 ] && [ "$pick" -le "${#existing_ttys[@]}" ]; then
+          configure_serial_node "${existing_ttys[$((pick - 1))]}"
+        fi
+        list_connected_usb_ups || true
+      fi
     else
+      local before_ttys before_usb
+      before_ttys="$(snapshot_tty_devices)"
+      before_usb="$(snapshot_lsusb)"
+
       echo ""
-      echo "Currently connected serial devices:"
-      local idx=1
-      for t in "${existing_ttys[@]}"; do
-        local bid
-        bid="$(find_by_id_for_tty "$t" || true)"
-        echo "  [$idx] $t ${bid:+(by-id: $bid)}"
-        idx=$((idx + 1))
-      done
-      local pick=""
-      read_tty "Select device number to add (or [0] to cancel): " pick
-      if [[ "${pick:-0}" =~ ^[0-9]+$ ]] && [ "$pick" -ge 1 ] && [ "$pick" -le "${#existing_ttys[@]}" ]; then
-        configure_serial_node "${existing_ttys[$((pick - 1))]}"
+      read_tty ">>> Please PLUG IN your USB / USB-Serial UPS adapter now, wait 2 seconds, then press [Enter] to scan... " _pause
+
+      if command -v udevadm >/dev/null 2>&1; then
+        udevadm settle --timeout=5 2>/dev/null || true
+      fi
+      sleep 2
+
+      local after_ttys after_usb
+      after_ttys="$(snapshot_tty_devices)"
+      after_usb="$(snapshot_lsusb)"
+
+      mapfile -t new_ttys < <(comm -13 <(printf "%s\n" "$before_ttys" | sort) <(printf "%s\n" "$after_ttys" | sort) | sed '/^$/d')
+      mapfile -t new_usb < <(comm -13 <(printf "%s\n" "$before_usb") <(printf "%s\n" "$after_usb") | sed '/^$/d')
+
+      if [ "${#new_ttys[@]}" -gt 0 ]; then
+        for dev_node in "${new_ttys[@]}"; do
+          configure_serial_node "$dev_node"
+        done
+      elif [ "${#new_usb[@]}" -gt 0 ]; then
+        echo ""
+        echo "Detected new USB device(s) (no ttyUSB/ttyACM serial node created):"
+        for line in "${new_usb[@]}"; do
+          echo "  * $line"
+        done
+        echo "Standard USB HID UPS devices are already accessible via /dev/bus/usb:/dev/bus/usb in docker-compose.yml."
+        echo "Once WEBNUT starts, use 'UPS Setup -> Scan Hardware (USB & Serial)' in the Web UI to add it."
+      else
+        echo ""
+        echo "No new USB or Serial device detected."
+        local retry_choice=""
+        read_tty "Choose [R]etry plug-in scan, [L]ist existing devices, or [C]ancel [R/l/c]: " retry_choice
+        case "${retry_choice:-R}" in
+          l|L)
+            mapfile -t existing_ttys < <(snapshot_tty_devices)
+            if [ "${#existing_ttys[@]}" -eq 0 ]; then
+              echo "No /dev/ttyUSB* or /dev/ttyACM* serial ports present."
+              list_connected_usb_ups || true
+            else
+              local idx=1
+              for t in "${existing_ttys[@]}"; do
+                echo "  [$idx] $t"
+                idx=$((idx + 1))
+              done
+              local pick=""
+              read_tty "Select device number to add (or [0] to skip): " pick
+              if [[ "${pick:-0}" =~ ^[0-9]+$ ]] && [ "$pick" -ge 1 ] && [ "$pick" -le "${#existing_ttys[@]}" ]; then
+                configure_serial_node "${existing_ttys[$((pick - 1))]}"
+              fi
+              list_connected_usb_ups || true
+            fi
+            ;;
+          c|C)
+            ;;
+          *)
+            continue
+            ;;
+        esac
       fi
     fi
-  else
-    before_ttys="$(snapshot_tty_devices)"
-    before_usb="$(snapshot_lsusb)"
 
-    echo ""
-    read_tty ">>> Please PLUG IN your USB / USB-Serial UPS adapter now, wait 2 seconds, then press [Enter] to scan... " _pause
-
-    if command -v udevadm >/dev/null 2>&1; then
-      udevadm settle --timeout=5 2>/dev/null || true
+    local another=""
+    read_tty "Configure another USB / USB-Serial UPS adapter? [y/N]: " another
+    if [ "${another:-N}" != "y" ] && [ "${another:-N}" != "Y" ]; then
+      break
     fi
-    sleep 2
+  done
 
-    after_ttys="$(snapshot_tty_devices)"
-    after_usb="$(snapshot_lsusb)"
-
-    mapfile -t new_ttys < <(comm -13 <(printf "%s\n" "$before_ttys" | sort) <(printf "%s\n" "$after_ttys" | sort) | sed '/^$/d')
-    mapfile -t new_usb < <(comm -13 <(printf "%s\n" "$before_usb") <(printf "%s\n" "$after_usb") | sed '/^$/d')
-
-    if [ "${#new_ttys[@]}" -gt 0 ]; then
-      for dev_node in "${new_ttys[@]}"; do
-        configure_serial_node "$dev_node"
-      done
-    elif [ "${#new_usb[@]}" -gt 0 ]; then
+  if [ "$FROM_INSTALLER" -eq 0 ] && [ "$ADDED_COUNT" -gt 0 ]; then
+    echo ""
+    local apply_now=""
+    read_tty "Apply changes and recreate the WEBNUT container now ('docker compose up -d')? [Y/n]: " apply_now
+    if [ "${apply_now:-Y}" != "n" ] && [ "${apply_now:-Y}" != "N" ]; then
+      (cd "$COMPOSE_DIR" && docker compose up -d)
       echo ""
-      echo "Detected new USB device(s) (no ttyUSB/ttyACM serial node created):"
-      for line in "${new_usb[@]}"; do
-        echo "  * $line"
-      done
-      echo "Standard USB HID UPS devices are already accessible via /dev/bus/usb:/dev/bus/usb in docker-compose.yml."
-      echo "Once WEBNUT starts, use 'NUT Config -> Scan Hardware (USB & Serial)' in the Web UI to add it."
+      echo "Container updated! Open WebNUT -> UPS Setup -> Scan Hardware (USB & Serial) to see your new device."
     else
-      echo ""
-      echo "No new USB or Serial device detected."
-      local retry_choice=""
-      read_tty "Choose [R]etry plug-in scan, [L]ist existing serial ports, or [C]ancel [R/l/c]: " retry_choice
-      case "${retry_choice:-R}" in
-        l|L)
-          mapfile -t existing_ttys < <(snapshot_tty_devices)
-          if [ "${#existing_ttys[@]}" -eq 0 ]; then
-            echo "No /dev/ttyUSB* or /dev/ttyACM* ports present."
-          else
-            local idx=1
-            for t in "${existing_ttys[@]}"; do
-              echo "  [$idx] $t"
-              idx=$((idx + 1))
-            done
-            local pick=""
-            read_tty "Select device number to add (or [0] to skip): " pick
-            if [[ "${pick:-0}" =~ ^[0-9]+$ ]] && [ "$pick" -ge 1 ] && [ "$pick" -le "${#existing_ttys[@]}" ]; then
-              configure_serial_node "${existing_ttys[$((pick - 1))]}"
-            fi
-          fi
-          ;;
-        c|C)
-          ;;
-        *)
-          continue
-          ;;
-      esac
+      echo "Run 'cd \"$COMPOSE_DIR\" && docker compose up -d' when ready."
     fi
   fi
+}
 
-  local another=""
-  read_tty "Configure another USB / USB-Serial UPS adapter? [y/N]: " another
-  if [ "${another:-N}" != "y" ] && [ "${another:-N}" != "Y" ]; then
-    break
-  fi
-done
-
-if [ "$FROM_INSTALLER" -eq 0 ] && [ "$ADDED_COUNT" -gt 0 ]; then
-  echo ""
-  local apply_now=""
-  read_tty "Apply changes and recreate the WEBNUT container now ('docker compose up -d')? [Y/n]: " apply_now
-  if [ "${apply_now:-Y}" != "n" ] && [ "${apply_now:-Y}" != "N" ]; then
-    (cd "$COMPOSE_DIR" && docker compose up -d)
-    echo ""
-    echo "Container updated! Open WEBNUT -> NUT Config -> Scan Hardware (USB & Serial) to see your new device."
-  else
-    echo "Run 'cd \"$COMPOSE_DIR\" && docker compose up -d' when ready."
-  fi
-fi
+main "$@"

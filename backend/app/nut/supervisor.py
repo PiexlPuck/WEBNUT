@@ -184,8 +184,8 @@ class NutSupervisor:
     async def restart_service(self, service: str) -> tuple[bool, str]:
         """Restart `upsd`, `upsmon`, or `drivers` (`upsdrvctl stop` + `upsdrvctl start`)."""
         if service == "drivers":
-            await self._run("upsdrvctl", "stop")
-            rc, out, err = await self._run("upsdrvctl", "start")
+            await self._run("upsdrvctl", "-u", "root", "stop")
+            rc, out, err = await self._run("upsdrvctl", "-u", "root", "start")
             if rc != 0:
                 return False, err or out or f"upsdrvctl start exited with {rc}"
             return True, out or "UPS drivers started"
@@ -205,7 +205,7 @@ class NutSupervisor:
 
     async def stop_service(self, service: str) -> tuple[bool, str]:
         if service == "drivers":
-            rc, out, err = await self._run("upsdrvctl", "stop")
+            rc, out, err = await self._run("upsdrvctl", "-u", "root", "stop")
             return rc == 0, err or out
         if service in ("upsd", "upsmon"):
             rc, out, err = await self._run(*self._sup_args("stop", service))

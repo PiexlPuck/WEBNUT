@@ -132,10 +132,41 @@ async def scan_snmp(payload: SnmpScanRequest, request: Request) -> list[ScannedS
     return devices
 
 
+async def _ensure_internal_upsd_port(request: Request) -> None:
+    """Ensure local upsd.conf does not clash with WebNUT's Smart NUT Repeater port."""
+    repeater = getattr(request.app.state, "repeater", None)
+    manager = request.app.state.nut_manager
+    internal_port = int(settings.webnut_internal_nut_port)
+    if repeater is None or not repeater.running or int(repeater.port) == internal_port:
+        return
+    upsd_parsed, _ = manager.read_config("upsd.conf", mask_secrets=False)
+    listens = list(upsd_parsed.get("listens", []))
+    clash = any(int(entry.get("port", 3493)) == int(repeater.port) for entry in listens)
+    if clash or not listens:
+        upsd_parsed["listens"] = [{"address": "127.0.0.1", "port": internal_port}]
+        await manager.save_config("upsd.conf", upsd_parsed, apply_reload=False)
+        nut_client = getattr(request.app.state, "nut_client", None)
+        if nut_client is not None:
+            nut_client.configure(settings.nut_host, internal_port)
+
+
+async def _refresh_live_telemetry(request: Request) -> None:
+    nut_client = getattr(request.app.state, "nut_client", None)
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+    if nut_client is None or orchestrator is None:
+        return
+    try:
+        snapshot = await nut_client.fetch_telemetry()
+        await orchestrator.evaluate_telemetry(snapshot.model_dump())
+    except Exception:
+        pass
+
+
 @router.post("/setup/snmp")
 async def setup_snmp_ups(payload: SnmpUpsSetupRequest, request: Request) -> dict:
     """One-page SNMP UPS configurator: saves snmp-ups entry to ups.conf and reloads drivers/upsd."""
     manager = request.app.state.nut_manager
+    await _ensure_internal_upsd_port(request)
     parsed, _ = manager.read_config("ups.conf", mask_secrets=True)
     ups_list = [u for u in parsed.get("ups_list", []) if u.get("name") != payload.name.strip()]
 
@@ -172,6 +203,7 @@ async def setup_snmp_ups(payload: SnmpUpsSetupRequest, request: Request) -> dict
 
     try:
         raw, applied, message = await manager.save_config("ups.conf", parsed, apply_reload=True)
+        await _refresh_live_telemetry(request)
         conn_row = await _get_connection_row(request.app.state.db)
         services = await request.app.state.supervisor.get_services_status(
             external_mode=(conn_row["mode"] == "external")
@@ -226,11 +258,15 @@ async def save_nut_config(
 ) -> NutConfigSaveResponse:
     manager = request.app.state.nut_manager
     try:
+        if filename == "ups.conf" and payload.apply_reload:
+            await _ensure_internal_upsd_port(request)
         raw, applied, message = await manager.save_config(
             filename,
             payload.parsed,
             apply_reload=payload.apply_reload,
         )
+        if filename == "ups.conf" and payload.apply_reload:
+            await _refresh_live_telemetry(request)
         # Push updated service status after config change
         conn_row = await _get_connection_row(request.app.state.db)
         services = await request.app.state.supervisor.get_services_status(

@@ -29,6 +29,11 @@ if [ ! -f "${NUT_DIR}/upsd.conf" ]; then
 # Managed by WEBNUT (internal upsd backend; LAN clients connect to WebNUT Repeater on ${NUT_PORT})
 LISTEN 127.0.0.1 ${INTERNAL_NUT_PORT}
 EOF
+elif [ "${INTERNAL_NUT_PORT}" != "${NUT_PORT}" ]; then
+  # Auto-migrate legacy v1 upsd.conf LISTEN port so it never collides with WebNUT Repeater on ${NUT_PORT}
+  if grep -qE "^[[:space:]]*LISTEN[[:space:]]+(0\.0\.0\.0|127\.0\.0\.1)[[:space:]]+${NUT_PORT}([[:space:]]|$)" "${NUT_DIR}/upsd.conf"; then
+    sed -i -E "s|^([[:space:]]*LISTEN[[:space:]]+)(0\.0\.0\.0|127\.0\.0\.1)[[:space:]]+${NUT_PORT}([[:space:]]*.*)$|\\1127.0.0.1 ${INTERNAL_NUT_PORT}\\3|" "${NUT_DIR}/upsd.conf"
+  fi
 fi
 
 if [ ! -f "${NUT_DIR}/upsd.users" ]; then
@@ -84,6 +89,9 @@ chmod 750 "${NUT_DIR}" "${NUT_DIR}/.backups" /run/nut /var/run/nut
 shopt -s nullglob
 for cfg in "${NUT_DIR}"/*.conf "${NUT_DIR}"/upsd.users; do
   chmod 640 "${cfg}"
+done
+for usb_dev in /dev/bus/usb/*/*; do
+  [ -e "${usb_dev}" ] && chmod a+rw "${usb_dev}" 2>/dev/null || true
 done
 for tty_dev in /dev/webnut-ups-* /dev/ttyUSB* /dev/ttyACM* /dev/serial/by-id/*; do
   if [ -e "${tty_dev}" ]; then

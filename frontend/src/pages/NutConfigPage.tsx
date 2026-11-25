@@ -129,8 +129,10 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
   const [scanOpen, setScanOpen] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [scanStderr, setScanStderr] = useState<string | null>(null);
   const [scanResult, setScanResult] = useState<HardwareScanResponse | null>(null);
   const [serialDriverChoices, setSerialDriverChoices] = useState<Record<string, string>>({});
+  const [addingDevice, setAddingDevice] = useState<string | null>(null);
 
   const loadTopState = useCallback(async () => {
     try {
@@ -364,6 +366,7 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
     setScanOpen(true);
     setScanning(true);
     setScanError(null);
+    setScanStderr(null);
     setScanResult(null);
     try {
       const res = await api.scanHardware();
@@ -383,40 +386,66 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
     }
   };
 
-  const _appendUpsBlock = async (block: UpsConfData["ups_list"][number], autoApply = false) => {
-    const loaded = await api.getNutConfig<UpsConfData>("ups.conf");
-    const targetData = loaded.parsed;
-    setActiveFile("ups.conf");
-    const existingNames = new Set((targetData.ups_list ?? []).map((u) => u.name));
-    let name = block.name;
-    let idx = 2;
-    while (existingNames.has(name)) {
-      name = `${block.name}_${idx++}`;
-    }
-
-    const next: UpsConfData = {
-      global_directives: targetData.global_directives ?? [],
-      ups_list: [...(targetData.ups_list ?? []), { ...block, name }],
-    };
-    setScanOpen(false);
-    setParsedData(next as unknown as Record<string, unknown>);
-    setLoadedFile("ups.conf");
-    if (autoApply) {
-      if (connForm.mode === "external") {
-        await api.saveNutConnection({ ...connForm, mode: "local" });
+  const _appendUpsBlock = async (
+    block: UpsConfData["ups_list"][number],
+    autoApply = false,
+    deviceKey = "device"
+  ) => {
+    setAddingDevice(deviceKey);
+    setScanError(null);
+    setScanStderr(null);
+    setFeedback(null);
+    try {
+      const loaded = await api.getNutConfig<UpsConfData>("ups.conf");
+      const targetData = loaded.parsed;
+      setActiveFile("ups.conf");
+      const existingNames = new Set((targetData.ups_list ?? []).map((u) => u.name));
+      let name = block.name;
+      let idx = 2;
+      while (existingNames.has(name)) {
+        name = `${block.name}_${idx++}`;
       }
-      const saved = await api.saveNutConfig("ups.conf", next, true);
-      setRawPreview(saved.raw);
-      setFeedback({ ok: true, msg: `Added '${name}' and started NUT drivers/upsd.` });
-      await loadTopState();
-      await onRefresh();
-    } else {
-      const prev = await api.previewNutConfig("ups.conf", next);
-      setRawPreview(prev.raw);
+
+      const next: UpsConfData = {
+        global_directives: targetData.global_directives ?? [],
+        ups_list: [...(targetData.ups_list ?? []), { ...block, name }],
+      };
+      if (autoApply) {
+        if (connForm.mode === "external") {
+          await api.saveNutConnection({ ...connForm, mode: "local" });
+        }
+        const saved = await api.saveNutConfig("ups.conf", next, true);
+        setParsedData(next as unknown as Record<string, unknown>);
+        setLoadedFile("ups.conf");
+        setRawPreview(saved.raw);
+        setScanOpen(false);
+        setFeedback({ ok: true, msg: `Added '${name}' and started NUT drivers/upsd.` });
+        await loadTopState();
+        await onRefresh();
+      } else {
+        setParsedData(next as unknown as Record<string, unknown>);
+        setLoadedFile("ups.conf");
+        const prev = await api.previewNutConfig("ups.conf", next);
+        setRawPreview(prev.raw);
+        setScanOpen(false);
+      }
+    } catch (err) {
+      let msg = err instanceof Error ? err.message : "Failed to add and start UPS";
+      let stderr: string | undefined;
+      if (err instanceof ApiError && typeof err.detail === "object" && err.detail !== null) {
+        const d = err.detail as { message?: string; stderr?: string };
+        msg = d.message || err.message;
+        stderr = d.stderr;
+      }
+      setScanError(msg);
+      setScanStderr(stderr ?? null);
+      setFeedback({ ok: false, msg, stderr });
+    } finally {
+      setAddingDevice(null);
     }
   };
 
-  const handleAddScannedDevice = async (dev: ScannedUsbDevice) => {
+  const handleAddScannedDevice = async (dev: ScannedUsbDevice, idx: number) => {
     const directives = [];
     if (dev.vendorid) directives.push({ key: "vendorid", value: dev.vendorid });
     if (dev.productid) directives.push({ key: "productid", value: dev.productid });
@@ -430,7 +459,8 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
         desc: [dev.vendor, dev.product].filter(Boolean).join(" ") || "USB UPS",
         directives,
       },
-      true
+      true,
+      `usb-${idx}`
     );
   };
 
@@ -445,7 +475,8 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
           [dev.manufacturer, dev.product].filter(Boolean).join(" ") || `Serial UPS (${dev.path})`,
         directives: [],
       },
-      true
+      true,
+      `serial-${dev.path}`
     );
   };
 
@@ -1102,12 +1133,23 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
           <div className="py-10 text-center text-sm text-slate-400">
             Scanning USB bus, passed-through serial ports, and lsusb devices...
           </div>
-        ) : scanError ? (
-          <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-300">
-            {scanError}
-          </div>
-        ) : !scanResult ? null : (
+        ) : (
           <div className="space-y-6">
+            {scanError && (
+              <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 p-4 text-xs text-rose-300 space-y-2">
+                <div className="font-semibold flex items-center gap-2">
+                  <AlertOctagon className="h-4 w-4 shrink-0" />
+                  <span>{scanError}</span>
+                </div>
+                {scanStderr && (
+                  <pre className="p-2.5 rounded-lg bg-surface-950 border border-rose-500/30 font-mono text-rose-200 overflow-x-auto whitespace-pre-wrap">
+                    {scanStderr}
+                  </pre>
+                )}
+              </div>
+            )}
+            {scanResult && (
+              <div className="space-y-6">
             {scanResult.warnings.length > 0 && (
               <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200 space-y-1">
                 {scanResult.warnings.map((w, i) => (
@@ -1153,10 +1195,11 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
                       </p>
                     </div>
                     <button
-                      onClick={() => void handleAddScannedDevice(dev)}
-                      className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white shrink-0"
+                      onClick={() => void handleAddScannedDevice(dev, idx)}
+                      disabled={addingDevice !== null}
+                      className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white shrink-0 disabled:opacity-50"
                     >
-                      Add &amp; Start
+                      {addingDevice === `usb-${idx}` ? "Adding & Starting..." : "Add & Start"}
                     </button>
                   </div>
                 ))
@@ -1225,9 +1268,12 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
                       </select>
                       <button
                         onClick={() => void handleAddSerialDevice(sd)}
-                        className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white"
+                        disabled={addingDevice !== null}
+                        className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white disabled:opacity-50"
                       >
-                        Add &amp; Start
+                        {addingDevice === `serial-${sd.path}`
+                          ? "Adding & Starting..."
+                          : "Add & Start"}
                       </button>
                     </div>
                   </div>
@@ -1256,6 +1302,8 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
                 </div>
               )}
             </div>
+              </div>
+            )}
           </div>
         )}
       </Modal>

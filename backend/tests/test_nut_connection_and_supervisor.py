@@ -87,3 +87,27 @@ async def test_migration_v4_nut_connection_and_client_reconfigure(db) -> None:
     client.configure("192.168.1.99", 3494)
     assert client.host == "192.168.1.99"
     assert client.port == 3494
+
+
+@pytest.mark.asyncio
+async def test_restart_and_stop_drivers_use_root_user(tmp_path: Path) -> None:
+    calls: list[tuple[str, ...]] = []
+    sup = NutSupervisor(nut_dir=tmp_path)
+
+    async def fake_run(*args: str, timeout: float = 15.0) -> tuple[int, str, str]:
+        calls.append(args)
+        return 0, "ok", ""
+
+    sup._run = fake_run  # type: ignore[method-assign]
+    ok, msg = await sup.restart_service("drivers")
+    assert ok is True
+    assert msg == "ok"
+    assert calls == [
+        ("upsdrvctl", "-u", "root", "stop"),
+        ("upsdrvctl", "-u", "root", "start"),
+    ]
+
+    calls.clear()
+    ok_stop, _ = await sup.stop_service("drivers")
+    assert ok_stop is True
+    assert calls == [("upsdrvctl", "-u", "root", "stop")]

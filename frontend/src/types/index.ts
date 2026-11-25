@@ -516,3 +516,89 @@ export interface AppVersionStatus {
   notified_at: string | null;
   github_repo: string;
 }
+
+export type HomepagePreset = "power" | "homelab" | "recovery" | "detailed" | "custom";
+export type HomepageDisplayMode = "block" | "list";
+
+export interface IntegrationSettingsView {
+  api_key_enabled: boolean;
+  api_key_configured: boolean;
+  api_key_preview: string;
+  homepage_enabled: boolean;
+  homepage_default_ups: string;
+  homepage_refresh_ms: number;
+  server_url: string;
+  ups_names: string[];
+}
+
+export interface IntegrationSettingsUpdatePayload {
+  api_key_enabled: boolean;
+  homepage_enabled: boolean;
+  homepage_default_ups: string;
+  homepage_refresh_ms: number;
+}
+
+export interface IntegrationApiKeyResponse {
+  api_key: string;
+  api_key_preview: string;
+  api_key_enabled: boolean;
+}
+
+export interface HomepageSummary {
+  connected: boolean;
+  ups_name: string;
+  ups_model: string;
+  ups_status: string;
+  ups_status_label: string;
+  on_battery: boolean;
+  low_battery: boolean;
+  battery_charge: number | null;
+  ups_load: number | null;
+  battery_runtime_sec: number | null;
+  battery_runtime_min: number | null;
+  input_voltage: number | null;
+  output_voltage: number | null;
+  realpower_watts: number | null;
+  orchestrator_state: string;
+  orchestrator_state_label: string;
+  hosts_online: number;
+  hosts_total: number;
+  hosts_summary: string;
+  hosts_waking: number;
+  repeater_running: boolean;
+  clients_connected: number;
+  ups_count: number;
+  updated_at: string;
+}
+
+export interface HomepageFieldOption {
+  field: string;
+  label: string;
+  format: "text" | "number" | "float" | "percent" | "duration";
+  suffix?: string | null;
+  description: string;
+}
+
+export interface HomepageConfigRequest {
+  service_name: string;
+  description: string;
+  icon: string;
+  base_url: string;
+  href_url: string;
+  ups_name: string;
+  preset: HomepagePreset;
+  display: HomepageDisplayMode;
+  selected_fields: string[];
+  refresh_interval_ms: number;
+  reveal_api_key: boolean;
+}
+
+export interface HomepageConfigResponse {
+  yaml: string;
+  endpoint_url: string;
+  requires_api_key: boolean;
+  display: HomepageDisplayMode;
+  mappings: HomepageFieldOption[];
+  sample_payload: HomepageSummary;
+  notes: string[];
+}

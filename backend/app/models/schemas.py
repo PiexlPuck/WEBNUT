@@ -634,3 +634,92 @@ class AppVersionStatus(BaseModel):
     notified_version: str | None = None
     notified_at: str | None = None
     github_repo: str = "PiexlPuck/WEBNUT"
+
+
+# --- External Integrations (Homepage, etc.) ---
+
+HomepagePreset = Literal["power", "homelab", "recovery", "detailed", "custom"]
+HomepageDisplayMode = Literal["block", "list"]
+
+
+class IntegrationSettingsView(BaseModel):
+    api_key_enabled: bool
+    api_key_configured: bool
+    api_key_preview: str = ""
+    homepage_enabled: bool
+    homepage_default_ups: str = ""
+    homepage_refresh_ms: int = 10000
+    server_url: str
+    ups_names: list[str] = Field(default_factory=list)
+
+
+class IntegrationSettingsUpdateRequest(BaseModel):
+    api_key_enabled: bool = False
+    homepage_enabled: bool = True
+    homepage_default_ups: str = Field(default="", max_length=64)
+    homepage_refresh_ms: int = Field(default=10000, ge=1000, le=300000)
+
+
+class IntegrationApiKeyResponse(BaseModel):
+    api_key: str
+    api_key_preview: str
+    api_key_enabled: bool
+
+
+class HomepageSummaryResponse(BaseModel):
+    connected: bool
+    ups_name: str
+    ups_model: str
+    ups_status: str
+    ups_status_label: str
+    on_battery: bool
+    low_battery: bool
+    battery_charge: float | None = None
+    ups_load: float | None = None
+    battery_runtime_sec: int | None = None
+    battery_runtime_min: float | None = None
+    input_voltage: float | None = None
+    output_voltage: float | None = None
+    realpower_watts: float | None = None
+    orchestrator_state: str
+    orchestrator_state_label: str
+    hosts_online: int
+    hosts_total: int
+    hosts_summary: str
+    hosts_waking: int
+    repeater_running: bool
+    clients_connected: int
+    ups_count: int
+    updated_at: str
+
+
+class HomepageFieldOption(BaseModel):
+    field: str
+    label: str
+    format: Literal["text", "number", "float", "percent", "duration"] = "text"
+    suffix: str | None = None
+    description: str = ""
+
+
+class HomepageConfigRequest(BaseModel):
+    service_name: str = Field(default="WebNUT", min_length=1, max_length=64)
+    description: str = Field(default="UPS & Power Orchestrator", max_length=120)
+    icon: str = Field(default="mdi-battery-charging", max_length=64)
+    base_url: str = Field(min_length=1, max_length=255)
+    href_url: str = Field(default="", max_length=255)
+    ups_name: str = Field(default="", max_length=64)
+    preset: HomepagePreset = "power"
+    display: HomepageDisplayMode = "block"
+    selected_fields: list[str] = Field(default_factory=list)
+    refresh_interval_ms: int = Field(default=10000, ge=1000, le=300000)
+    reveal_api_key: bool = False
+
+
+class HomepageConfigResponse(BaseModel):
+    yaml: str
+    endpoint_url: str
+    requires_api_key: bool
+    display: HomepageDisplayMode
+    mappings: list[HomepageFieldOption]
+    sample_payload: HomepageSummaryResponse
+    notes: list[str] = Field(default_factory=list)

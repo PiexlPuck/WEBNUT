@@ -5,6 +5,7 @@ import { useLiveTelemetry } from "./hooks/useLiveTelemetry";
 import { DashboardPage } from "./pages/DashboardPage";
 import { EventsPage } from "./pages/EventsPage";
 import { HostsPage } from "./pages/HostsPage";
+import { IntegrationsPage } from "./pages/IntegrationsPage";
 import { NotificationsPage } from "./pages/NotificationsPage";
 import { NutClientsPage } from "./pages/NutClientsPage";
 import { NutConfigPage } from "./pages/NutConfigPage";
@@ -59,8 +60,19 @@ export function App() {
             onClearPreselectedHost={() => setClientSetupHostId(null)}
           />
         )}
+        {activeTab === "integrations" && (
+          <IntegrationsPage
+            telemetry={live.telemetry}
+            hosts={live.hosts}
+            orchestrator={live.orchestrator}
+          />
+        )}
         {activeTab === "nut" && (
-          <NutConfigPage services={live.services} onRefresh={live.refreshAll} />
+          <NutConfigPage
+            services={live.services}
+            telemetry={live.telemetry}
+            onRefresh={live.refreshAll}
+          />
         )}
         {activeTab === "notifications" && <NotificationsPage />}
         {activeTab === "events" && <EventsPage />}

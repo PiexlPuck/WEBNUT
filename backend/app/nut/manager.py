@@ -147,6 +147,11 @@ class NutConfigManager:
 
         backup_path = self._create_backup(filename)
         target_path = self._file_path(filename)
+        if filename == "ups.conf" and apply_reload and existing_raw.strip():
+            prev_ups = parse_ups_conf(existing_raw)
+            if prev_ups.ups_list:
+                # Stop active drivers before overwriting ups.conf so removed/renamed UPSes release ports
+                await self.supervisor.stop_service("drivers")
         _atomic_write_text(target_path, serialized)
 
         if not apply_reload:

@@ -180,6 +180,8 @@ async def test_atomic_save_and_rollback_on_daemon_failure(tmp_path: Path, event_
     assert "invalid directive" in exc_info.value.stderr
     # File contents must be restored to original
     assert (nut_dir / "ups.conf").read_text(encoding="utf-8") == original_ups
+    # Drivers stop was attempted cleanly before rewriting ups.conf
+    assert ("stop", "drivers") in sup.calls
     # Backup file must exist
     backups = list((nut_dir / ".backups").rglob("ups.conf"))
     assert len(backups) == 1

@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.events import router as events_router
 from app.api.hosts import router as hosts_router
+from app.api.integrations import router as integrations_router
 from app.api.notifications import router as notifications_router
 from app.api.nut import router as nut_router
 from app.api.orchestrator import router as orchestrator_router
@@ -171,6 +172,7 @@ app.include_router(orchestrator_router)
 app.include_router(notifications_router)
 app.include_router(events_router)
 app.include_router(system_router)
+app.include_router(integrations_router)
 
 
 @app.get("/api/health")

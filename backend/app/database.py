@@ -358,6 +358,36 @@ class Database:
             )
             await self.conn.commit()
 
+        if 8 not in applied:
+            now = utc_now_iso()
+            await self.conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS integration_settings (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    api_key_enabled INTEGER NOT NULL DEFAULT 0,
+                    api_key_enc TEXT NOT NULL DEFAULT '',
+                    homepage_enabled INTEGER NOT NULL DEFAULT 1,
+                    homepage_default_ups TEXT NOT NULL DEFAULT '',
+                    homepage_refresh_ms INTEGER NOT NULL DEFAULT 10000,
+                    updated_at TEXT NOT NULL
+                );
+                """
+            )
+            await self.conn.execute(
+                """
+                INSERT OR IGNORE INTO integration_settings (
+                    id, api_key_enabled, api_key_enc, homepage_enabled,
+                    homepage_default_ups, homepage_refresh_ms, updated_at
+                ) VALUES (1, 0, '', 1, '', 10000, ?)
+                """,
+                (now,),
+            )
+            await self.conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (8, ?)",
+                (now,),
+            )
+            await self.conn.commit()
+
     async def fetch_one(self, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
         cur = await self.conn.execute(sql, params)
         row = await cur.fetchone()

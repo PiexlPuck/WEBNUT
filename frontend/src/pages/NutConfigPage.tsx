@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   Cpu,
+  Edit2,
   Globe,
   HardDrive,
   Network,
@@ -33,6 +34,7 @@ import type {
   ScannedUsbDevice,
   SerialDeviceInfo,
   SnmpUpsSetupPayload,
+  TelemetrySnapshot,
   UpsConfData,
   UpsdConfData,
   UpsdUsersData,
@@ -41,7 +43,61 @@ import type {
 
 interface NutConfigPageProps {
   services: NutServiceStatus[];
+  telemetry: TelemetrySnapshot;
   onRefresh: () => Promise<void>;
+}
+
+function sanitizeUpsId(raw: string, fallback = "ups1"): string {
+  const cleaned = raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, "_")
+    .replace(/^[_\-.]+|[_\-.]+$/g, "");
+  return (cleaned || fallback).slice(0, 48);
+}
+
+function suggestFriendlyUpsName(dev: ScannedUsbDevice): string {
+  const base = (dev.product || dev.vendor || dev.suggested_name || "ups1")
+    .replace(/fw:.*$/i, "")
+    .replace(/\bid=\S+/gi, "")
+    .trim();
+  const words = base.split(/\s+/).filter(Boolean).slice(0, 3).join("_");
+  return sanitizeUpsId(words || dev.suggested_name, "ups1");
+}
+
+function getUpsDirective(ups: UpsConfData["ups_list"][number], key: string): string {
+  const found = (ups.directives || []).find(
+    (d) => d.key.toLowerCase() === key.toLowerCase()
+  );
+  return (found?.value || "").trim();
+}
+
+function findMatchingConfiguredUpsForUsb(
+  dev: ScannedUsbDevice,
+  configured: UpsConfData["ups_list"]
+): UpsConfData["ups_list"][number] | undefined {
+  const devSerial = (dev.serial || "").trim().toLowerCase();
+  const devVid = (dev.vendorid || "").trim().toLowerCase();
+  const devPid = (dev.productid || "").trim().toLowerCase();
+
+  return configured.find((u) => {
+    const uSerial = getUpsDirective(u, "serial").toLowerCase();
+    if (devSerial && uSerial && devSerial === uSerial) return true;
+    const uVid = getUpsDirective(u, "vendorid").toLowerCase();
+    const uPid = getUpsDirective(u, "productid").toLowerCase();
+    if (devVid && devPid && uVid === devVid && uPid === devPid) {
+      if (devSerial && uSerial && devSerial !== uSerial) return false;
+      return true;
+    }
+    return false;
+  });
+}
+
+function findMatchingConfiguredUpsForSerial(
+  sd: SerialDeviceInfo,
+  configured: UpsConfData["ups_list"]
+): UpsConfData["ups_list"][number] | undefined {
+  return configured.find((u) => u.port.trim() === sd.path.trim());
 }
 
 const CONFIG_TABS: NutConfigFile[] = [
@@ -65,11 +121,19 @@ const SNMP_MIBS = [
   "netvision",
 ];
 
-export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
+export function NutConfigPage({ services, telemetry, onRefresh }: NutConfigPageProps) {
   const [sourceTab, setSourceTab] = useState<"usb" | "snmp" | "external">("usb");
   const [repeater, setRepeater] = useState<RepeaterStatusResponse | null>(null);
   const [policy, setPolicy] = useState<OrchestratorConfig | null>(null);
   const [savingPolicy, setSavingPolicy] = useState(false);
+  const [configuredUps, setConfiguredUps] = useState<UpsConfData["ups_list"]>([]);
+  const [upsGlobalDirectives, setUpsGlobalDirectives] = useState<
+    UpsConfData["global_directives"]
+  >([]);
+  const [removingUpsName, setRemovingUpsName] = useState<string | null>(null);
+  const [renameTarget, setRenameTarget] = useState<UpsConfData["ups_list"][number] | null>(null);
+  const [renameForm, setRenameForm] = useState({ name: "", desc: "" });
+  const [renaming, setRenaming] = useState(false);
 
   // External NUT Server form
   const [connForm, setConnForm] = useState<NutConnectionConfigPayload>({
@@ -132,14 +196,17 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
   const [scanStderr, setScanStderr] = useState<string | null>(null);
   const [scanResult, setScanResult] = useState<HardwareScanResponse | null>(null);
   const [serialDriverChoices, setSerialDriverChoices] = useState<Record<string, string>>({});
+  const [usbNameChoices, setUsbNameChoices] = useState<Record<number, string>>({});
+  const [serialNameChoices, setSerialNameChoices] = useState<Record<string, string>>({});
   const [addingDevice, setAddingDevice] = useState<string | null>(null);
 
   const loadTopState = useCallback(async () => {
     try {
-      const [cfg, rep, orch] = await Promise.all([
+      const [cfg, rep, orch, upsCfg] = await Promise.all([
         api.getNutConnection(),
         api.getRepeaterStatus(),
         api.getOrchestratorConfig(),
+        api.getNutConfig<UpsConfData>("ups.conf"),
       ]);
       setConnForm({
         mode: cfg.mode,
@@ -153,6 +220,8 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
       }
       setRepeater(rep);
       setPolicy(orch);
+      setConfiguredUps(upsCfg.parsed?.ups_list ?? []);
+      setUpsGlobalDirectives(upsCfg.parsed?.global_directives ?? []);
     } catch {
       // Ignore initial load error
     }
@@ -369,20 +438,134 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
     setScanStderr(null);
     setScanResult(null);
     try {
-      const res = await api.scanHardware();
+      const [res, upsCfg] = await Promise.all([
+        api.scanHardware(),
+        api.getNutConfig<UpsConfData>("ups.conf"),
+      ]);
+      const existingUps = upsCfg.parsed?.ups_list ?? [];
+      setConfiguredUps(existingUps);
+      setUpsGlobalDirectives(upsCfg.parsed?.global_directives ?? []);
       setScanResult(res);
+
+      const usbNames: Record<number, string> = {};
+      res.nut_usb_devices.forEach((dev, idx) => {
+        const match = findMatchingConfiguredUpsForUsb(dev, existingUps);
+        usbNames[idx] = match ? match.name : suggestFriendlyUpsName(dev);
+      });
+      setUsbNameChoices(usbNames);
+
       const defaults: Record<string, string> = {};
+      const serNames: Record<string, string> = {};
       for (const sd of res.serial_devices) {
         const mfrLower = `${sd.manufacturer ?? ""} ${sd.product ?? ""}`.toLowerCase();
         defaults[sd.path] = mfrLower.includes("apc")
           ? "apcsmart"
           : res.serial_drivers[0] || "nutdrv_qx";
+        const match = findMatchingConfiguredUpsForSerial(sd, existingUps);
+        serNames[sd.path] = match ? match.name : sanitizeUpsId(sd.suggested_name, "serial_ups");
       }
       setSerialDriverChoices(defaults);
+      setSerialNameChoices(serNames);
     } catch (err) {
       setScanError(err instanceof ApiError ? err.message : "Hardware scan failed");
     } finally {
       setScanning(false);
+    }
+  };
+
+  const handleRemoveUps = async (upsName: string, keepScanModalOpen = false) => {
+    if (!window.confirm(`Remove UPS '${upsName}' from ups.conf and stop its driver?`)) return;
+    setRemovingUpsName(upsName);
+    setScanError(null);
+    setScanStderr(null);
+    setFeedback(null);
+    try {
+      const loaded = await api.getNutConfig<UpsConfData>("ups.conf");
+      const current = loaded.parsed;
+      const next: UpsConfData = {
+        global_directives: current.global_directives ?? upsGlobalDirectives,
+        ups_list: (current.ups_list ?? []).filter((u) => u.name !== upsName),
+      };
+      const saved = await api.saveNutConfig("ups.conf", next, true);
+      setConfiguredUps(next.ups_list);
+      if (activeFile === "ups.conf") {
+        setParsedData(next as unknown as Record<string, unknown>);
+        setLoadedFile("ups.conf");
+        setRawPreview(saved.raw);
+      }
+      setFeedback({ ok: true, msg: `Removed UPS '${upsName}' cleanly.` });
+      await loadTopState();
+      await onRefresh();
+      if (!keepScanModalOpen) {
+        setScanOpen(false);
+      }
+    } catch (err) {
+      let msg = err instanceof Error ? err.message : `Failed to remove UPS '${upsName}'`;
+      let stderr: string | undefined;
+      if (err instanceof ApiError && typeof err.detail === "object" && err.detail !== null) {
+        const d = err.detail as { message?: string; stderr?: string };
+        msg = d.message || err.message;
+        stderr = d.stderr;
+      }
+      setScanError(msg);
+      setScanStderr(stderr ?? null);
+      setFeedback({ ok: false, msg, stderr });
+    } finally {
+      setRemovingUpsName(null);
+    }
+  };
+
+  const openRenameUpsModal = (ups: UpsConfData["ups_list"][number]) => {
+    setRenameTarget(ups);
+    setRenameForm({ name: ups.name, desc: ups.desc || "" });
+  };
+
+  const handleSaveRenameUps = async () => {
+    if (!renameTarget) return;
+    const cleanName = sanitizeUpsId(renameForm.name, renameTarget.name);
+    setRenaming(true);
+    setFeedback(null);
+    try {
+      const loaded = await api.getNutConfig<UpsConfData>("ups.conf");
+      const current = loaded.parsed;
+      const duplicate = (current.ups_list ?? []).some(
+        (u) => u.name === cleanName && u.name !== renameTarget.name
+      );
+      if (duplicate) {
+        setFeedback({ ok: false, msg: `A UPS named '${cleanName}' already exists.` });
+        return;
+      }
+      const next: UpsConfData = {
+        global_directives: current.global_directives ?? upsGlobalDirectives,
+        ups_list: (current.ups_list ?? []).map((u) =>
+          u.name === renameTarget.name
+            ? { ...u, name: cleanName, desc: renameForm.desc.trim() }
+            : u
+        ),
+      };
+      const saved = await api.saveNutConfig("ups.conf", next, true);
+      setConfiguredUps(next.ups_list);
+      if (activeFile === "ups.conf") {
+        setParsedData(next as unknown as Record<string, unknown>);
+        setLoadedFile("ups.conf");
+        setRawPreview(saved.raw);
+      }
+      setRenameTarget(null);
+      setFeedback({ ok: true, msg: `Renamed UPS to '${cleanName}'.` });
+      await loadTopState();
+      await onRefresh();
+    } catch (err) {
+      if (err instanceof ApiError && typeof err.detail === "object" && err.detail !== null) {
+        const d = err.detail as { message?: string; stderr?: string };
+        setFeedback({ ok: false, msg: d.message || err.message, stderr: d.stderr });
+      } else {
+        setFeedback({
+          ok: false,
+          msg: err instanceof Error ? err.message : "Failed to rename UPS",
+        });
+      }
+    } finally {
+      setRenaming(false);
     }
   };
 
@@ -399,11 +582,12 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
       const loaded = await api.getNutConfig<UpsConfData>("ups.conf");
       const targetData = loaded.parsed;
       setActiveFile("ups.conf");
+      const cleanRequested = sanitizeUpsId(block.name, "ups1");
       const existingNames = new Set((targetData.ups_list ?? []).map((u) => u.name));
-      let name = block.name;
+      let name = cleanRequested;
       let idx = 2;
       while (existingNames.has(name)) {
-        name = `${block.name}_${idx++}`;
+        name = `${cleanRequested}_${idx++}`;
       }
 
       const next: UpsConfData = {
@@ -415,6 +599,7 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
           await api.saveNutConnection({ ...connForm, mode: "local" });
         }
         const saved = await api.saveNutConfig("ups.conf", next, true);
+        setConfiguredUps(next.ups_list);
         setParsedData(next as unknown as Record<string, unknown>);
         setLoadedFile("ups.conf");
         setRawPreview(saved.raw);
@@ -423,6 +608,7 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
         await loadTopState();
         await onRefresh();
       } else {
+        setConfiguredUps(next.ups_list);
         setParsedData(next as unknown as Record<string, unknown>);
         setLoadedFile("ups.conf");
         const prev = await api.previewNutConfig("ups.conf", next);
@@ -446,6 +632,8 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
   };
 
   const handleAddScannedDevice = async (dev: ScannedUsbDevice, idx: number) => {
+    const rawChosen = (usbNameChoices[idx] || "").trim();
+    const friendlyId = sanitizeUpsId(rawChosen || suggestFriendlyUpsName(dev), "ups1");
     const directives = [];
     if (dev.vendorid) directives.push({ key: "vendorid", value: dev.vendorid });
     if (dev.productid) directives.push({ key: "productid", value: dev.productid });
@@ -453,10 +641,13 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
 
     await _appendUpsBlock(
       {
-        name: dev.suggested_name,
+        name: friendlyId,
         driver: dev.driver,
         port: dev.port || "auto",
-        desc: [dev.vendor, dev.product].filter(Boolean).join(" ") || "USB UPS",
+        desc:
+          (rawChosen && rawChosen !== friendlyId ? rawChosen : "") ||
+          [dev.vendor, dev.product].filter(Boolean).join(" ") ||
+          "USB UPS",
         directives,
       },
       true,
@@ -465,14 +656,18 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
   };
 
   const handleAddSerialDevice = async (dev: SerialDeviceInfo) => {
+    const rawChosen = (serialNameChoices[dev.path] || "").trim();
+    const friendlyId = sanitizeUpsId(rawChosen || dev.suggested_name, "serial_ups");
     const driver = serialDriverChoices[dev.path] || "nutdrv_qx";
     await _appendUpsBlock(
       {
-        name: dev.suggested_name,
+        name: friendlyId,
         driver,
         port: dev.path,
         desc:
-          [dev.manufacturer, dev.product].filter(Boolean).join(" ") || `Serial UPS (${dev.path})`,
+          (rawChosen && rawChosen !== friendlyId ? rawChosen : "") ||
+          [dev.manufacturer, dev.product].filter(Boolean).join(" ") ||
+          `Serial UPS (${dev.path})`,
         directives: [],
       },
       true,
@@ -941,6 +1136,112 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
         )}
       </div>
 
+      {/* Configured UPS Devices Registry (Easy View, Rename & Remove) */}
+      <div className="rounded-2xl border border-slate-800 bg-surface-900 overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <HardDrive className="h-4 w-4 text-emerald-400" />
+            <div>
+              <h3 className="text-sm font-semibold text-white">Configured UPS Devices</h3>
+              <p className="text-xs text-slate-400">
+                Manage friendly names, inspect USB/Serial/SNMP hardware IDs, or remove a UPS in one
+                click
+              </p>
+            </div>
+          </div>
+          <span className="text-xs font-mono text-slate-400">
+            {configuredUps.length} configured
+          </span>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead className="bg-surface-950/60 text-[11px] uppercase text-slate-400 border-b border-slate-800">
+              <tr>
+                <th className="px-4 py-3">Friendly Name / Description</th>
+                <th className="px-4 py-3">Driver</th>
+                <th className="px-4 py-3">Connection / Hardware ID</th>
+                <th className="px-4 py-3">Live Status</th>
+                <th className="px-4 py-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/70">
+              {configuredUps.map((u) => {
+                const liveUps = telemetry.ups_list.find((t) => t.name === u.name);
+                const vid = getUpsDirective(u, "vendorid");
+                const pid = getUpsDirective(u, "productid");
+                const sn = getUpsDirective(u, "serial");
+                const hwBits = [
+                  `port=${u.port}`,
+                  vid && pid ? `USB ${vid}:${pid}` : "",
+                  sn ? `SN:${sn}` : "",
+                ]
+                  .filter(Boolean)
+                  .join(" • ");
+                return (
+                  <tr key={u.name} className="hover:bg-surface-800/40">
+                    <td className="px-4 py-3">
+                      <div className="font-mono font-semibold text-white">{u.name}</div>
+                      {u.desc && <div className="text-slate-400 mt-0.5">{u.desc}</div>}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
+                        {u.driver}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 font-mono text-slate-300">{hwBits}</td>
+                    <td className="px-4 py-3">
+                      {liveUps ? (
+                        <span className="inline-flex items-center gap-1.5 font-mono text-emerald-300">
+                          <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                          {liveUps.status}
+                          {liveUps.battery_charge !== null
+                            ? ` • ${liveUps.battery_charge.toFixed(0)}%`
+                            : ""}
+                        </span>
+                      ) : connForm.mode === "external" ? (
+                        <span className="text-slate-400">External Repeater Mode</span>
+                      ) : (
+                        <span className="text-slate-500">Not polling yet</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-right whitespace-nowrap space-x-1.5">
+                      <button
+                        type="button"
+                        onClick={() => openRenameUpsModal(u)}
+                        disabled={removingUpsName === u.name}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-surface-800 hover:bg-surface-700 border border-slate-700 text-slate-200 disabled:opacity-50"
+                      >
+                        <Edit2 className="h-3 w-3" />
+                        Rename
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleRemoveUps(u.name)}
+                        disabled={removingUpsName === u.name}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 disabled:opacity-50"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                        {removingUpsName === u.name ? "Removing..." : "Remove"}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+              {configuredUps.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="p-6 text-center text-slate-500">
+                    No local UPS devices configured in <code>ups.conf</code> yet. Use{" "}
+                    <strong>Scan &amp; Add USB/Serial UPS</strong> or{" "}
+                    <strong>SNMP Network UPS</strong> above.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       {/* Global UPS Disconnect Grace & Repeater Policy Card */}
       {policy && (
         <div className="rounded-2xl border border-slate-800 bg-surface-900 p-5 space-y-4">
@@ -1169,40 +1470,93 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
                   a USB-Serial adapter.
                 </p>
               ) : (
-                scanResult.nut_usb_devices.map((dev, idx) => (
-                  <div
-                    key={`${dev.driver}-${idx}`}
-                    className="rounded-xl border border-slate-700 bg-surface-950 p-3.5 flex items-center justify-between gap-4"
-                  >
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className="font-semibold text-white text-sm">
-                          {dev.product || dev.suggested_name}
-                        </span>
-                        <span className="text-xs font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded">
-                          {dev.driver}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-400 font-mono">
-                        {[
-                          dev.vendor,
-                          dev.vendorid && `VID:${dev.vendorid}`,
-                          dev.productid && `PID:${dev.productid}`,
-                          dev.serial && `SN:${dev.serial}`,
-                        ]
-                          .filter(Boolean)
-                          .join(" • ")}
-                      </p>
-                    </div>
-                    <button
-                      onClick={() => void handleAddScannedDevice(dev, idx)}
-                      disabled={addingDevice !== null}
-                      className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white shrink-0 disabled:opacity-50"
+                scanResult.nut_usb_devices.map((dev, idx) => {
+                  const matched = findMatchingConfiguredUpsForUsb(dev, configuredUps);
+                  return (
+                    <div
+                      key={`${dev.driver}-${idx}`}
+                      className={`rounded-xl border p-3.5 space-y-3 ${
+                        matched
+                          ? "border-emerald-500/40 bg-emerald-500/5"
+                          : "border-slate-700 bg-surface-950"
+                      }`}
                     >
-                      {addingDevice === `usb-${idx}` ? "Adding & Starting..." : "Add & Start"}
-                    </button>
-                  </div>
-                ))
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="space-y-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-semibold text-white text-sm">
+                              {dev.product || dev.suggested_name}
+                            </span>
+                            <span className="text-xs font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded">
+                              {dev.driver}
+                            </span>
+                            {matched && (
+                              <span className="inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                                <CheckCircle2 className="h-3 w-3" />
+                                Already Configured as &apos;{matched.name}&apos;
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-slate-400 font-mono">
+                            {[
+                              dev.vendor,
+                              dev.vendorid && `VID:${dev.vendorid}`,
+                              dev.productid && `PID:${dev.productid}`,
+                              dev.serial && `SN:${dev.serial}`,
+                            ]
+                              .filter(Boolean)
+                              .join(" • ")}
+                          </p>
+                        </div>
+
+                        {matched ? (
+                          <div className="flex items-center gap-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => openRenameUpsModal(matched)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 border border-slate-700 text-xs text-slate-200"
+                            >
+                              <Edit2 className="h-3 w-3" />
+                              Rename
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleRemoveUps(matched.name, true)}
+                              disabled={removingUpsName === matched.name}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-xs text-rose-300 disabled:opacity-50"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                              {removingUpsName === matched.name ? "Removing..." : "Remove"}
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex flex-wrap items-center gap-2 shrink-0">
+                            <input
+                              value={usbNameChoices[idx] ?? ""}
+                              onChange={(e) =>
+                                setUsbNameChoices((prev) => ({
+                                  ...prev,
+                                  [idx]: e.target.value,
+                                }))
+                              }
+                              placeholder="Friendly name (e.g. main_ups)"
+                              className="w-44 rounded-lg bg-surface-900 border border-slate-700 px-2.5 py-1.5 text-xs font-mono text-white"
+                            />
+                            <button
+                              onClick={() => void handleAddScannedDevice(dev, idx)}
+                              disabled={addingDevice !== null}
+                              className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white shrink-0 disabled:opacity-50"
+                            >
+                              {addingDevice === `usb-${idx}`
+                                ? "Adding & Starting..."
+                                : "Add & Start"}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
               )}
             </div>
 
@@ -1218,66 +1572,112 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
                   Docker host to attach a USB-Serial adapter.
                 </div>
               ) : (
-                scanResult.serial_devices.map((sd) => (
-                  <div
-                    key={sd.path}
-                    className="rounded-xl border border-slate-700 bg-surface-950 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-                  >
-                    <div className="space-y-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-mono text-sm font-semibold text-white">
-                          {sd.path}
-                        </span>
-                        <span
-                          className={`text-[10px] px-1.5 py-0.5 rounded border ${
-                            sd.accessible
-                              ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
-                              : "bg-rose-500/15 text-rose-300 border-rose-500/30"
-                          }`}
-                        >
-                          {sd.accessible ? "R/W OK" : "Check Perms"}
-                        </span>
+                scanResult.serial_devices.map((sd) => {
+                  const matched = findMatchingConfiguredUpsForSerial(sd, configuredUps);
+                  return (
+                    <div
+                      key={sd.path}
+                      className={`rounded-xl border p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                        matched
+                          ? "border-emerald-500/40 bg-emerald-500/5"
+                          : "border-slate-700 bg-surface-950"
+                      }`}
+                    >
+                      <div className="space-y-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-mono text-sm font-semibold text-white">
+                            {sd.path}
+                          </span>
+                          <span
+                            className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                              sd.accessible
+                                ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                                : "bg-rose-500/15 text-rose-300 border-rose-500/30"
+                            }`}
+                          >
+                            {sd.accessible ? "R/W OK" : "Check Perms"}
+                          </span>
+                          {matched && (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                              <CheckCircle2 className="h-3 w-3" />
+                              Already Configured as &apos;{matched.name}&apos;
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-slate-400 font-mono truncate">
+                          {[
+                            sd.manufacturer,
+                            sd.product,
+                            sd.vendor_id && sd.product_id && `${sd.vendor_id}:${sd.product_id}`,
+                            sd.serial && `SN:${sd.serial}`,
+                          ]
+                            .filter(Boolean)
+                            .join(" • ") || "Serial TTY device"}
+                        </p>
                       </div>
-                      <p className="text-xs text-slate-400 font-mono truncate">
-                        {[
-                          sd.manufacturer,
-                          sd.product,
-                          sd.vendor_id && sd.product_id && `${sd.vendor_id}:${sd.product_id}`,
-                          sd.serial && `SN:${sd.serial}`,
-                        ]
-                          .filter(Boolean)
-                          .join(" • ") || "Serial TTY device"}
-                      </p>
+                      {matched ? (
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => openRenameUpsModal(matched)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 border border-slate-700 text-xs text-slate-200"
+                          >
+                            <Edit2 className="h-3 w-3" />
+                            Rename
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleRemoveUps(matched.name, true)}
+                            disabled={removingUpsName === matched.name}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-xs text-rose-300 disabled:opacity-50"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                            {removingUpsName === matched.name ? "Removing..." : "Remove"}
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          <input
+                            value={serialNameChoices[sd.path] ?? ""}
+                            onChange={(e) =>
+                              setSerialNameChoices((prev) => ({
+                                ...prev,
+                                [sd.path]: e.target.value,
+                              }))
+                            }
+                            placeholder="Friendly name"
+                            className="w-36 rounded-lg bg-surface-900 border border-slate-700 px-2.5 py-1.5 text-xs font-mono text-white"
+                          />
+                          <select
+                            value={serialDriverChoices[sd.path] || "nutdrv_qx"}
+                            onChange={(e) =>
+                              setSerialDriverChoices((prev) => ({
+                                ...prev,
+                                [sd.path]: e.target.value,
+                              }))
+                            }
+                            className="rounded-lg bg-surface-900 border border-slate-700 px-2.5 py-1.5 text-xs font-mono text-white"
+                          >
+                            {scanResult.serial_drivers.map((drv) => (
+                              <option key={drv} value={drv}>
+                                {drv}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            onClick={() => void handleAddSerialDevice(sd)}
+                            disabled={addingDevice !== null}
+                            className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white disabled:opacity-50"
+                          >
+                            {addingDevice === `serial-${sd.path}`
+                              ? "Adding & Starting..."
+                              : "Add & Start"}
+                          </button>
+                        </div>
+                      )}
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <select
-                        value={serialDriverChoices[sd.path] || "nutdrv_qx"}
-                        onChange={(e) =>
-                          setSerialDriverChoices((prev) => ({
-                            ...prev,
-                            [sd.path]: e.target.value,
-                          }))
-                        }
-                        className="rounded-lg bg-surface-900 border border-slate-700 px-2.5 py-1.5 text-xs font-mono text-white"
-                      >
-                        {scanResult.serial_drivers.map((drv) => (
-                          <option key={drv} value={drv}>
-                            {drv}
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        onClick={() => void handleAddSerialDevice(sd)}
-                        disabled={addingDevice !== null}
-                        className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white disabled:opacity-50"
-                      >
-                        {addingDevice === `serial-${sd.path}`
-                          ? "Adding & Starting..."
-                          : "Add & Start"}
-                      </button>
-                    </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
 
@@ -1406,6 +1806,57 @@ export function NutConfigPage({ services, onRefresh }: NutConfigPageProps) {
               ))}
             </div>
           )}
+        </div>
+      </Modal>
+
+      {/* Rename UPS Modal */}
+      <Modal
+        open={renameTarget !== null}
+        title={renameTarget ? `Rename UPS — ${renameTarget.name}` : "Rename UPS"}
+        onClose={() => setRenameTarget(null)}
+        maxWidth="max-w-md"
+      >
+        <div className="space-y-4">
+          <div>
+            <label className="block text-xs text-slate-400 mb-1">
+              UPS Stream Name (ID in ups.conf &amp; Repeater)
+            </label>
+            <input
+              value={renameForm.name}
+              onChange={(e) => setRenameForm({ ...renameForm, name: e.target.value })}
+              placeholder="e.g. apc_smart_ups"
+              className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-sm font-mono text-white"
+            />
+            <p className="text-[11px] text-slate-500 mt-1">
+              Normalized to valid NUT ID characters: <code>{sanitizeUpsId(renameForm.name || "ups1")}</code>
+            </p>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-400 mb-1">Description (Optional)</label>
+            <input
+              value={renameForm.desc}
+              onChange={(e) => setRenameForm({ ...renameForm, desc: e.target.value })}
+              placeholder="Rack APC Smart-UPS 1000"
+              className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-sm text-white"
+            />
+          </div>
+          <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
+            <button
+              type="button"
+              onClick={() => setRenameTarget(null)}
+              className="px-4 py-2 rounded-lg bg-surface-800 text-xs text-slate-300"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleSaveRenameUps()}
+              disabled={renaming || !renameForm.name.trim()}
+              className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white disabled:opacity-50"
+            >
+              {renaming ? "Applying..." : "Save & Restart Drivers"}
+            </button>
+          </div>
         </div>
       </Modal>
     </div>

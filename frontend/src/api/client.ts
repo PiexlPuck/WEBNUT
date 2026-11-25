@@ -4,9 +4,16 @@ import type {
   CreateSecondaryUserResponse,
   EventLogPage,
   HardwareScanResponse,
+  HomepageConfigRequest,
+  HomepageConfigResponse,
+  HomepageFieldOption,
+  HomepageSummary,
   HostPayload,
   HostRecord,
   HostTestRunResponse,
+  IntegrationApiKeyResponse,
+  IntegrationSettingsUpdatePayload,
+  IntegrationSettingsView,
   MonitorAccountRevealResponse,
   NotificationRuleItem,
   NotificationSettings,
@@ -255,4 +262,44 @@ export const api = {
   getVersionStatus: () => request<AppVersionStatus>("/api/system/version"),
   checkForUpdates: () =>
     request<AppVersionStatus>("/api/system/version/check", { method: "POST" }),
+
+  // Integrations (Homepage, etc.)
+  getIntegrationSettings: () =>
+    request<IntegrationSettingsView>("/api/integrations/settings"),
+  updateIntegrationSettings: (payload: IntegrationSettingsUpdatePayload) =>
+    request<IntegrationSettingsView>("/api/integrations/settings", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+  rotateIntegrationApiKey: () =>
+    request<IntegrationApiKeyResponse>("/api/integrations/api-key/rotate", {
+      method: "POST",
+    }),
+  revealIntegrationApiKey: () =>
+    request<IntegrationApiKeyResponse>("/api/integrations/api-key/reveal"),
+  revokeIntegrationApiKey: () =>
+    request<{ revoked: boolean }>("/api/integrations/api-key", {
+      method: "DELETE",
+    }),
+  getHomepageFields: () =>
+    request<HomepageFieldOption[]>("/api/integrations/homepage/fields"),
+  getHomepagePreview: (ups = "") => {
+    const qs = ups ? `?ups=${encodeURIComponent(ups)}` : "";
+    return request<HomepageSummary>(`/api/integrations/homepage/preview${qs}`);
+  },
+  testHomepageSummary: (ups = "", apiKey = "") => {
+    const qs = ups ? `?ups=${encodeURIComponent(ups)}` : "";
+    const headers: Record<string, string> = {};
+    if (apiKey.trim()) {
+      headers["X-API-Key"] = apiKey.trim();
+    }
+    return request<HomepageSummary>(`/api/integrations/homepage/summary${qs}`, {
+      headers,
+    });
+  },
+  generateHomepageConfig: (payload: HomepageConfigRequest) =>
+    request<HomepageConfigResponse>("/api/integrations/homepage/generate", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
 };

@@ -390,31 +390,39 @@ export function NutClientsPage({
         <div className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold mb-3">
           WebNUT Repeater &amp; Recovery Pipeline
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-center text-xs">
-          <div className="rounded-xl bg-surface-950 border border-slate-800 p-3">
-            <div className="font-semibold text-amber-300">1. Upstream UPS Event</div>
-            <div className="text-slate-400 mt-1">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-stretch auto-rows-fr text-xs">
+          <div className="h-full flex flex-col justify-between rounded-xl bg-surface-950 border border-slate-800 p-3.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-semibold text-amber-300">1. Upstream UPS Event</span>
+              <ArrowRight className="h-3.5 w-3.5 text-slate-500 hidden md:block shrink-0" />
+            </div>
+            <div className="text-slate-400 mt-1.5">
               USB, Serial, SNMP, or External NUT Server polled live
             </div>
           </div>
-          <div className="rounded-xl bg-surface-950 border border-indigo-500/30 p-3">
-            <div className="flex items-center justify-between">
+          <div className="h-full flex flex-col justify-between rounded-xl bg-surface-950 border border-indigo-500/30 p-3.5">
+            <div className="flex items-center justify-between gap-2">
               <span className="font-semibold text-indigo-300">2. Virtual UPS Stream</span>
-              <ArrowRight className="h-3.5 w-3.5 text-slate-500 hidden md:block" />
+              <ArrowRight className="h-3.5 w-3.5 text-slate-500 hidden md:block shrink-0" />
             </div>
-            <div className="text-slate-300 mt-1 font-mono">
+            <div className="text-slate-300 mt-1.5 font-mono">
               {liveClientPairs.length} connected • {linkedHosts.length} linked
             </div>
           </div>
-          <div className="rounded-xl bg-surface-950 border border-slate-800 p-3">
-            <div className="font-semibold text-emerald-300">3. Per-Host Shutdown</div>
-            <div className="text-slate-400 mt-1">
+          <div className="h-full flex flex-col justify-between rounded-xl bg-surface-950 border border-slate-800 p-3.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-semibold text-emerald-300">3. Per-Host Shutdown</span>
+              <ArrowRight className="h-3.5 w-3.5 text-slate-500 hidden md:block shrink-0" />
+            </div>
+            <div className="text-slate-400 mt-1.5">
               Streams OB LB FSD or holds grace timer per host
             </div>
           </div>
-          <div className="rounded-xl bg-surface-950 border border-slate-800 p-3">
-            <div className="font-semibold text-sky-300">4. Staged Battery WoL</div>
-            <div className="text-slate-400 mt-1">
+          <div className="h-full flex flex-col justify-between rounded-xl bg-surface-950 border border-slate-800 p-3.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-semibold text-sky-300">4. Staged Battery WoL</span>
+            </div>
+            <div className="text-slate-400 mt-1.5">
               Wakes each host at its own OL battery % threshold
             </div>
           </div>

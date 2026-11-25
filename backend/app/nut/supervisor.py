@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import tempfile
 from pathlib import Path
 
 from app.models.schemas import NutServiceStatus
@@ -42,23 +43,47 @@ class NutSupervisor:
         exe = shutil.which(args[0])
         if exe is None:
             return 127, "", f"Executable '{args[0]}' not found"
-        proc = await asyncio.create_subprocess_exec(
-            exe,
-            *args[1:],
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        # Use temp files instead of PIPEs so daemonized children (e.g. upsdrvctl -> usbhid-ups)
+        # cannot hold stdout/stderr open and hang proc.communicate() until timeout.
+        out_f = tempfile.TemporaryFile()
+        err_f = tempfile.TemporaryFile()
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return 124, "", f"Command '{' '.join(args)}' timed out after {timeout:.0f}s"
-        return (
-            proc.returncode or 0,
-            stdout_b.decode("utf-8", errors="replace").strip(),
-            stderr_b.decode("utf-8", errors="replace").strip(),
-        )
+            proc = await asyncio.create_subprocess_exec(
+                exe,
+                *args[1:],
+                stdout=out_f,
+                stderr=err_f,
+            )
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except Exception:
+                    pass
+                out_f.seek(0)
+                err_f.seek(0)
+                partial_err = err_f.read().decode("utf-8", errors="replace").strip()
+                return (
+                    124,
+                    out_f.read().decode("utf-8", errors="replace").strip(),
+                    partial_err or f"Command '{' '.join(args)}' timed out after {timeout:.0f}s",
+                )
+
+            out_f.seek(0)
+            err_f.seek(0)
+            return (
+                proc.returncode or 0,
+                out_f.read().decode("utf-8", errors="replace").strip(),
+                err_f.read().decode("utf-8", errors="replace").strip(),
+            )
+        finally:
+            out_f.close()
+            err_f.close()
 
     def _sup_args(self, *cmd: str) -> tuple[str, ...]:
         if self.supervisor_conf.exists():

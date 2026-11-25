@@ -129,7 +129,10 @@ async def lifespan(app: FastAPI):
     app.state.version_checker = version_checker
 
     if not is_external:
-        await _bootstrap_nut_daemons(settings.webnut_nut_dir, supervisor)
+        try:
+            await _bootstrap_nut_daemons(settings.webnut_nut_dir, supervisor)
+        except Exception as exc:
+            logger.exception("Initial NUT daemon bootstrap failed (continuing UI startup): %s", exc)
     await orchestrator.reconcile_on_startup()
     orch_cfg = await orchestrator.get_config()
     if orch_cfg.repeater_enabled:

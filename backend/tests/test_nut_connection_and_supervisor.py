@@ -111,3 +111,24 @@ async def test_restart_and_stop_drivers_use_root_user(tmp_path: Path) -> None:
     ok_stop, _ = await sup.stop_service("drivers")
     assert ok_stop is True
     assert calls == [("upsdrvctl", "-u", "root", "stop")]
+
+
+@pytest.mark.asyncio
+async def test_supervisor_run_does_not_hang_on_daemonized_child(tmp_path: Path) -> None:
+    import sys
+    import time
+
+    sup = NutSupervisor(nut_dir=tmp_path)
+    # Parent prints and spawns a short-lived grandchild holding stdout/stderr open, then exits immediately.
+    script = (
+        "import subprocess, sys; "
+        "print('driver starting'); sys.stdout.flush(); "
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3)'])"
+    )
+    t0 = time.monotonic()
+    rc, out, err = await sup._run(sys.executable, "-c", script, timeout=1.5)
+    elapsed = time.monotonic() - t0
+    assert rc == 0
+    assert "driver starting" in out
+    assert err == ""
+    assert elapsed < 2.0

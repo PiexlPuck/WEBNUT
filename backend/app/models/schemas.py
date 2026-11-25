@@ -401,22 +401,41 @@ class ConnectedNutClient(BaseModel):
     matched_host_name: str | None = None
 
 
+class SavedMonitorAccount(BaseModel):
+    username: str
+    role: str = "secondary"
+    notes: str = ""
+    has_password: bool = True
+    source: Literal["saved", "upsd"] = "saved"
+    updated_at: str | None = None
+
+
+class MonitorAccountRevealResponse(BaseModel):
+    username: str
+    password: str
+    role: str = "secondary"
+    notes: str = ""
+
+
 class NutClientsOverview(BaseModel):
     server_ip: str
     nut_port: int
     ups_names: list[str] = Field(default_factory=list)
     available_users: list[str] = Field(default_factory=list)
+    saved_accounts: list[SavedMonitorAccount] = Field(default_factory=list)
     connected_clients: list[ConnectedNutClient] = Field(default_factory=list)
 
 
 class CreateSecondaryUserRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(default="", max_length=256)
+    notes: str = Field(default="", max_length=120)
 
 
 class CreateSecondaryUserResponse(BaseModel):
     username: str
     password: str
+    notes: str = ""
     upsmon_role: Literal["secondary"] = "secondary"
     applied: bool
     message: str

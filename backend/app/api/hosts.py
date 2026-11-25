@@ -388,7 +388,20 @@ async def deploy_host_nut_client(
     orch_cfg = await request.app.state.orchestrator.get_config()
     repeater_ip = detect_local_lan_ip()
     repeater_port = int(orch_cfg.repeater_port)
-    nut_password = payload.nut_password.strip() or secrets.token_urlsafe(16)
+    nut_username = payload.nut_username.strip()
+    raw_nut_pw = payload.nut_password.strip()
+    nut_password = ""
+    if raw_nut_pw and raw_nut_pw != SECRET_MASK:
+        nut_password = raw_nut_pw
+    else:
+        acct_row = await db.fetch_one(
+            "SELECT password_enc FROM nut_client_accounts WHERE username = ?",
+            (nut_username,),
+        )
+        if acct_row and acct_row.get("password_enc"):
+            nut_password = secret_box.decrypt(str(acct_row["password_enc"]))
+    if not nut_password:
+        nut_password = secrets.token_urlsafe(16)
 
     result = await deploy_nut_client_ssh(
         host=str(host["ip_or_host"]),

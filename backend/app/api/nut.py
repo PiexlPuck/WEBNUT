@@ -14,6 +14,7 @@ from app.models.schemas import (
     CreateSecondaryUserRequest,
     CreateSecondaryUserResponse,
     HardwareScanResponse,
+    MonitorAccountRevealResponse,
     NutClientConfigRequest,
     NutClientConfigResponse,
     NutClientsOverview,
@@ -28,6 +29,7 @@ from app.models.schemas import (
     NutConnectionTestResponse,
     NutServiceStatus,
     RepeaterStatusResponse,
+    SavedMonitorAccount,
     ScannedSnmpDevice,
     ScannedUsbDevice,
     SnmpScanRequest,
@@ -491,11 +493,49 @@ async def get_nut_clients(request: Request) -> NutClientsOverview:
     orch_cfg = await orchestrator.get_config()
     repeater_port = int(orch_cfg.repeater_port) if orch_cfg.repeater_enabled else settings.nut_port
 
+    saved_rows = await db.fetch_all(
+        "SELECT username, role, notes, password_enc, updated_at FROM nut_client_accounts ORDER BY updated_at DESC, username ASC"
+    )
+    saved_accounts: list[SavedMonitorAccount] = []
+    seen_saved: set[str] = set()
+    for sr in saved_rows:
+        uname = str(sr["username"])
+        seen_saved.add(uname)
+        if uname not in available_users:
+            available_users.append(uname)
+        saved_accounts.append(
+            SavedMonitorAccount(
+                username=uname,
+                role=str(sr.get("role") or "secondary"),
+                notes=str(sr.get("notes") or ""),
+                has_password=bool(sr.get("password_enc")),
+                source="saved",
+                updated_at=sr.get("updated_at"),
+            )
+        )
+
+    for u in users_parsed.get("users", []):
+        uname = str(u.get("username") or "").strip()
+        if not uname or uname == "admin" or uname in seen_saved:
+            continue
+        seen_saved.add(uname)
+        saved_accounts.append(
+            SavedMonitorAccount(
+                username=uname,
+                role=str(u.get("upsmon_role") or "secondary") or "secondary",
+                notes="Defined in upsd.users",
+                has_password=bool(u.get("password")),
+                source="upsd",
+                updated_at=None,
+            )
+        )
+
     return NutClientsOverview(
         server_ip=detect_local_lan_ip(),
         nut_port=repeater_port,
         ups_names=ups_names_set,
         available_users=available_users,
+        saved_accounts=saved_accounts,
         connected_clients=connected_clients,
     )
 
@@ -506,8 +546,13 @@ async def create_secondary_nut_user(
     request: Request,
 ) -> CreateSecondaryUserResponse:
     manager = request.app.state.nut_manager
+    db = request.app.state.db
     username = payload.username.strip()
     password = payload.password.strip() or secrets.token_urlsafe(16)
+    notes = payload.notes.strip()
+
+    conn_row = await _get_connection_row(db)
+    apply_reload = conn_row["mode"] != "external"
 
     parsed_users, _ = manager.read_config("upsd.users", mask_secrets=True)
     users_list = list(parsed_users.get("users", []))
@@ -534,7 +579,7 @@ async def create_secondary_nut_user(
         _, applied, message = await manager.save_config(
             "upsd.users",
             parsed_users,
-            apply_reload=True,
+            apply_reload=apply_reload,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -548,13 +593,115 @@ async def create_secondary_nut_user(
             },
         ) from exc
 
+    secret_box = request.app.state.secret_box
+    password_enc = secret_box.encrypt(password)
+    now = utc_now_iso()
+    await db.execute(
+        """
+        INSERT INTO nut_client_accounts (username, password_enc, role, notes, created_at, updated_at)
+        VALUES (?, ?, 'secondary', ?, ?, ?)
+        ON CONFLICT(username) DO UPDATE SET
+            password_enc = excluded.password_enc,
+            role = excluded.role,
+            notes = excluded.notes,
+            updated_at = excluded.updated_at
+        """,
+        (username, password_enc, notes, now, now),
+    )
+
+    event_log = getattr(request.app.state, "event_log", None)
+    if event_log is not None:
+        await event_log.record(
+            "nut_config",
+            "info",
+            "monitor_account_saved",
+            f"Saved secondary NUT monitor account '{username}'",
+            {"username": username, "notes": notes, "applied": applied},
+        )
+
     return CreateSecondaryUserResponse(
         username=username,
         password=password,
+        notes=notes,
         upsmon_role="secondary",
         applied=applied,
         message=message,
     )
+
+
+@router.get("/clients/accounts/{username}/reveal", response_model=MonitorAccountRevealResponse)
+async def reveal_monitor_account(username: str, request: Request) -> MonitorAccountRevealResponse:
+    target = username.strip()
+    db = request.app.state.db
+    row = await db.fetch_one(
+        "SELECT username, password_enc, role, notes FROM nut_client_accounts WHERE username = ?",
+        (target,),
+    )
+    if row is not None:
+        secret_box = request.app.state.secret_box
+        return MonitorAccountRevealResponse(
+            username=str(row["username"]),
+            password=secret_box.decrypt(str(row.get("password_enc") or "")),
+            role=str(row.get("role") or "secondary"),
+            notes=str(row.get("notes") or ""),
+        )
+
+    manager = request.app.state.nut_manager
+    parsed_users, _ = manager.read_config("upsd.users", mask_secrets=False)
+    for entry in parsed_users.get("users", []):
+        if entry.get("username") == target and target != "admin":
+            return MonitorAccountRevealResponse(
+                username=target,
+                password=str(entry.get("password") or ""),
+                role=str(entry.get("upsmon_role") or "secondary") or "secondary",
+                notes="Defined in upsd.users",
+            )
+
+    raise HTTPException(status_code=404, detail=f"Monitor account '{target}' not found")
+
+
+@router.delete("/clients/accounts/{username}")
+async def delete_monitor_account(username: str, request: Request) -> dict:
+    target = username.strip()
+    if target == "admin":
+        raise HTTPException(status_code=400, detail="Cannot delete the primary 'admin' NUT user")
+
+    db = request.app.state.db
+    manager = request.app.state.nut_manager
+    existing_db = await db.fetch_one(
+        "SELECT id FROM nut_client_accounts WHERE username = ?", (target,)
+    )
+    parsed_users, _ = manager.read_config("upsd.users", mask_secrets=True)
+    users_list = list(parsed_users.get("users", []))
+    remaining_users = [u for u in users_list if u.get("username") != target]
+    removed_from_file = len(remaining_users) != len(users_list)
+
+    if existing_db is None and not removed_from_file:
+        raise HTTPException(status_code=404, detail=f"Monitor account '{target}' not found")
+
+    if existing_db is not None:
+        await db.execute("DELETE FROM nut_client_accounts WHERE username = ?", (target,))
+
+    if removed_from_file:
+        conn_row = await _get_connection_row(db)
+        parsed_users["users"] = remaining_users
+        await manager.save_config(
+            "upsd.users",
+            parsed_users,
+            apply_reload=(conn_row["mode"] != "external"),
+        )
+
+    event_log = getattr(request.app.state, "event_log", None)
+    if event_log is not None:
+        await event_log.record(
+            "nut_config",
+            "info",
+            "monitor_account_deleted",
+            f"Deleted secondary NUT monitor account '{target}'",
+            {"username": target},
+        )
+
+    return {"deleted": True, "username": target}
 
 
 @router.post("/clients/generate", response_model=NutClientConfigResponse)

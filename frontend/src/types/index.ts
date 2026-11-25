@@ -392,17 +392,35 @@ export interface ConnectedNutClient {
   matched_host_name: string | null;
 }
 
+export interface SavedMonitorAccount {
+  username: string;
+  role: string;
+  notes: string;
+  has_password: boolean;
+  source: "saved" | "upsd";
+  updated_at: string | null;
+}
+
+export interface MonitorAccountRevealResponse {
+  username: string;
+  password: string;
+  role: string;
+  notes: string;
+}
+
 export interface NutClientsOverview {
   server_ip: string;
   nut_port: number;
   ups_names: string[];
   available_users: string[];
+  saved_accounts: SavedMonitorAccount[];
   connected_clients: ConnectedNutClient[];
 }
 
 export interface CreateSecondaryUserResponse {
   username: string;
   password: string;
+  notes?: string;
   upsmon_role: "secondary";
   applied: boolean;
   message: string;

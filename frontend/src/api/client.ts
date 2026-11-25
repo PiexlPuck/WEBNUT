@@ -6,6 +6,7 @@ import type {
   HardwareScanResponse,
   HostPayload,
   HostRecord,
+  MonitorAccountRevealResponse,
   NotificationRuleItem,
   NotificationSettings,
   NutClientConfigRequest,
@@ -125,11 +126,20 @@ export const api = {
       { method: "POST" }
     ),
   getNutClients: () => request<NutClientsOverview>("/api/nut/clients"),
-  createSecondaryNutUser: (username: string, password = "") =>
+  createSecondaryNutUser: (username: string, password = "", notes = "") =>
     request<CreateSecondaryUserResponse>("/api/nut/clients/create-user", {
       method: "POST",
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, notes }),
     }),
+  revealMonitorAccount: (username: string) =>
+    request<MonitorAccountRevealResponse>(
+      `/api/nut/clients/accounts/${encodeURIComponent(username)}/reveal`
+    ),
+  deleteMonitorAccount: (username: string) =>
+    request<{ deleted: boolean; username: string }>(
+      `/api/nut/clients/accounts/${encodeURIComponent(username)}`,
+      { method: "DELETE" }
+    ),
   generateNutClientConfig: (payload: NutClientConfigRequest) =>
     request<NutClientConfigResponse>("/api/nut/clients/generate", {
       method: "POST",

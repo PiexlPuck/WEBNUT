@@ -305,6 +305,27 @@ class Database:
             )
             await self.conn.commit()
 
+        if 6 not in applied:
+            now = utc_now_iso()
+            await self.conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS nut_client_accounts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE,
+                    password_enc TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'secondary',
+                    notes TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                """
+            )
+            await self.conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (6, ?)",
+                (now,),
+            )
+            await self.conn.commit()
+
     async def fetch_one(self, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
         cur = await self.conn.execute(sql, params)
         row = await cur.fetchone()

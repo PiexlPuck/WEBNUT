@@ -5,11 +5,15 @@ import {
   Check,
   CheckCircle2,
   Copy,
+  Eye,
+  EyeOff,
   KeyRound,
   Link2,
   RefreshCw,
   Server,
   Terminal,
+  Trash2,
+  UserCheck,
 } from "lucide-react";
 import { api, ApiError } from "../api/client";
 import type {
@@ -64,7 +68,10 @@ export function NutClientsPage({
   // Secondary user creator state
   const [newUser, setNewUser] = useState("wolnut_client");
   const [newPass, setNewPass] = useState("");
+  const [newNotes, setNewNotes] = useState("");
   const [creatingUser, setCreatingUser] = useState(false);
+  const [revealedPasswords, setRevealedPasswords] = useState<Record<string, string>>({});
+  const [loadingAccount, setLoadingAccount] = useState<string | null>(null);
   const [userFeedback, setUserFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
 
   // One-button SSH deploy state
@@ -145,21 +152,119 @@ export function NutClientsPage({
     setCreatingUser(true);
     setUserFeedback(null);
     try {
-      const res = await api.createSecondaryNutUser(newUser.trim(), newPass.trim());
+      const res = await api.createSecondaryNutUser(
+        newUser.trim(),
+        newPass.trim(),
+        newNotes.trim()
+      );
       setForm((prev) => ({ ...prev, username: res.username, password: res.password }));
+      setRevealedPasswords((prev) => ({ ...prev, [res.username]: res.password }));
       setNewPass(res.password);
       setUserFeedback({
         ok: true,
-        msg: `Created/updated secondary NUT user '${res.username}'. Password pre-filled below.`,
+        msg: `Saved monitor account '${res.username}' encrypted in WebNUT. Pre-filled below.`,
       });
       await loadOverview();
     } catch (err) {
       setUserFeedback({
         ok: false,
-        msg: err instanceof ApiError ? err.message : "Failed to create secondary NUT user",
+        msg: err instanceof ApiError ? err.message : "Failed to save secondary NUT user",
       });
     } finally {
       setCreatingUser(false);
+    }
+  };
+
+  const fetchAccountPassword = async (username: string): Promise<string> => {
+    if (revealedPasswords[username] !== undefined) {
+      return revealedPasswords[username];
+    }
+    const res = await api.revealMonitorAccount(username);
+    return res.password;
+  };
+
+  const handleToggleRevealAccount = async (username: string) => {
+    if (revealedPasswords[username] !== undefined) {
+      setRevealedPasswords((prev) => {
+        const next = { ...prev };
+        delete next[username];
+        return next;
+      });
+      return;
+    }
+    setLoadingAccount(username);
+    try {
+      const res = await api.revealMonitorAccount(username);
+      setRevealedPasswords((prev) => ({ ...prev, [username]: res.password }));
+    } catch (err) {
+      setUserFeedback({
+        ok: false,
+        msg: err instanceof ApiError ? err.message : `Failed to reveal password for '${username}'`,
+      });
+    } finally {
+      setLoadingAccount(null);
+    }
+  };
+
+  const handleUseSavedAccount = async (username: string) => {
+    if (!username) return;
+    setLoadingAccount(username);
+    try {
+      const password = await fetchAccountPassword(username);
+      setForm((prev) => ({ ...prev, username, password }));
+      setUserFeedback({
+        ok: true,
+        msg: `Loaded monitor account '${username}' into client configuration below.`,
+      });
+    } catch (err) {
+      setUserFeedback({
+        ok: false,
+        msg: err instanceof ApiError ? err.message : `Failed to load account '${username}'`,
+      });
+    } finally {
+      setLoadingAccount(null);
+    }
+  };
+
+  const handleCopyAccountPassword = async (username: string) => {
+    setLoadingAccount(username);
+    try {
+      const password = await fetchAccountPassword(username);
+      await navigator.clipboard.writeText(password);
+      setCopiedKey(`acct-${username}`);
+      window.setTimeout(() => setCopiedKey(null), 2000);
+    } catch (err) {
+      setUserFeedback({
+        ok: false,
+        msg: err instanceof ApiError ? err.message : `Failed to copy password for '${username}'`,
+      });
+    } finally {
+      setLoadingAccount(null);
+    }
+  };
+
+  const handleDeleteSavedAccount = async (username: string) => {
+    setLoadingAccount(username);
+    setUserFeedback(null);
+    try {
+      await api.deleteMonitorAccount(username);
+      setRevealedPasswords((prev) => {
+        const next = { ...prev };
+        delete next[username];
+        return next;
+      });
+      setUserFeedback({
+        ok: true,
+        msg: `Deleted monitor account '${username}'.`,
+      });
+      await loadOverview();
+    } catch (err) {
+      setUserFeedback({
+        ok: false,
+        msg: err instanceof ApiError ? err.message : `Failed to delete account '${username}'`,
+      });
+    } finally {
+      setLoadingAccount(null);
     }
   };
 
@@ -178,7 +283,7 @@ export function NutClientsPage({
       const res = await api.deployHostClient(hid, {
         ...sshForm,
         nut_username: form.username,
-        nut_password: form.password || "webnut_stream",
+        nut_password: form.password,
         final_delay: form.final_delay,
         shutdown_cmd: form.shutdown_cmd,
       });
@@ -375,42 +480,129 @@ export function NutClientsPage({
             <KeyRound className="h-4 w-4 text-indigo-400" />
             <div>
               <h3 className="text-sm font-semibold text-white">
-                Quick Secondary NUT User (`upsd.users`)
+                Saved Monitor Accounts (`upsd.users`)
               </h3>
               <p className="text-xs text-slate-400">
-                Create credentials or use any username with WebNUT&apos;s Repeater
+                Create and save encrypted monitor credentials for quick reuse on new clients
               </p>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
             <input
               value={newUser}
               onChange={(e) => setNewUser(e.target.value)}
-              placeholder="wolnut_client"
-              className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-sm text-white font-mono"
+              placeholder="Username (e.g. proxmox_mon)"
+              className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-xs text-white font-mono"
             />
             <input
               type="text"
               value={newPass}
               onChange={(e) => setNewPass(e.target.value)}
               placeholder="Password (blank = auto)"
-              className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-sm text-white font-mono"
+              className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-xs text-white font-mono"
+            />
+            <input
+              value={newNotes}
+              onChange={(e) => setNewNotes(e.target.value)}
+              placeholder="Note (e.g. Proxmox / TrueNAS)"
+              className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-xs text-white"
             />
           </div>
 
           <div className="flex items-center justify-between gap-3">
-            <span className="text-xs text-slate-500 truncate">
-              Users: {overview?.available_users.join(", ") || "—"}
+            <span className="text-xs text-slate-500">
+              {overview?.saved_accounts.length || 0} saved account(s)
             </span>
             <button
               onClick={handleCreateUser}
-              disabled={creatingUser}
+              disabled={creatingUser || !newUser.trim()}
               className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white disabled:opacity-50 shrink-0"
             >
               <CheckCircle2 className="h-3.5 w-3.5" />
-              {creatingUser ? "Applying..." : "Create Secondary User"}
+              {creatingUser ? "Saving..." : "Save Monitor Account"}
             </button>
+          </div>
+
+          {/* Saved Monitor Accounts List */}
+          <div className="rounded-xl border border-slate-800 bg-surface-950 divide-y divide-slate-800/70 max-h-56 overflow-y-auto">
+            {(overview?.saved_accounts ?? []).map((acc) => {
+              const revealed = revealedPasswords[acc.username];
+              const isBusy = loadingAccount === acc.username;
+              return (
+                <div
+                  key={acc.username}
+                  className="px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-mono font-semibold text-white">{acc.username}</span>
+                      <span className="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] text-slate-300">
+                        {acc.role}
+                      </span>
+                      {acc.notes && (
+                        <span className="text-[11px] text-slate-400 truncate">{acc.notes}</span>
+                      )}
+                    </div>
+                    {revealed !== undefined && (
+                      <div className="mt-1 font-mono text-[11px] text-emerald-300 bg-surface-900 border border-emerald-500/30 rounded px-2 py-0.5 inline-block select-all">
+                        {revealed}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      onClick={() => void handleUseSavedAccount(acc.username)}
+                      disabled={isBusy}
+                      title="Load username & password into client setup"
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-indigo-300 font-medium disabled:opacity-50"
+                    >
+                      <UserCheck className="h-3 w-3" />
+                      Use
+                    </button>
+                    <button
+                      onClick={() => void handleToggleRevealAccount(acc.username)}
+                      disabled={isBusy}
+                      title={revealed !== undefined ? "Hide password" : "Reveal password"}
+                      className="p-1.5 rounded bg-surface-800 hover:bg-surface-700 text-slate-300 disabled:opacity-50"
+                    >
+                      {revealed !== undefined ? (
+                        <EyeOff className="h-3.5 w-3.5" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                    <button
+                      onClick={() => void handleCopyAccountPassword(acc.username)}
+                      disabled={isBusy}
+                      title="Copy password"
+                      className="p-1.5 rounded bg-surface-800 hover:bg-surface-700 text-slate-300 disabled:opacity-50"
+                    >
+                      {copiedKey === `acct-${acc.username}` ? (
+                        <Check className="h-3.5 w-3.5 text-emerald-400" />
+                      ) : (
+                        <Copy className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                    {acc.username !== "admin" && (
+                      <button
+                        onClick={() => void handleDeleteSavedAccount(acc.username)}
+                        disabled={isBusy}
+                        title="Delete monitor account"
+                        className="p-1.5 rounded bg-surface-800 hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 disabled:opacity-50"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+            {(overview?.saved_accounts.length ?? 0) === 0 && (
+              <div className="p-4 text-center text-xs text-slate-500">
+                No saved monitor accounts yet. Create one above so its password stays easy to reuse.
+              </div>
+            )}
           </div>
 
           {missingLinkedHosts.length > 0 && (
@@ -428,97 +620,46 @@ export function NutClientsPage({
         </div>
       </div>
 
-      {/* One-Button SSH/SFTP Deployment & Manual Config Generator */}
+      {/* Configure New Client & Manual Generator */}
       <div className="rounded-2xl border border-slate-800 bg-surface-900 p-5 space-y-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
           <div className="flex items-center gap-2">
-            <Terminal className="h-4 w-4 text-emerald-400" />
+            <Terminal className="h-4 w-4 text-indigo-400" />
             <h3 className="text-base font-semibold text-white">
-              Deploy via SSH/SFTP or Generate Config
+              Configure New Client
             </h3>
           </div>
-          <select
-            value={selectedHostId}
-            onChange={(e) => handleSelectHost(e.target.value)}
-            className="rounded-lg bg-surface-950 border border-slate-700 px-3 py-1.5 text-xs text-slate-200"
-          >
-            <option value="">Select Managed Host (recommended)...</option>
-            {hosts.map((h) => (
-              <option key={h.id} value={h.id}>
-                {h.name} ({h.ip_or_host}) → {h.virtual_ups_name || h.name}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {/* One-Button SSH Deploy Strip */}
-        <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="text-xs font-semibold text-emerald-300">
-              One-Button Remote SSH/SFTP Setup (Linux / Proxmox)
-            </div>
-            <button
-              onClick={() => void handleOneButtonSshDeploy()}
-              disabled={deployingSsh || !selectedHostId || !sshForm.ssh_password.trim()}
-              className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-medium text-white disabled:opacity-50"
+          <div className="flex flex-wrap items-center gap-2">
+            {(overview?.saved_accounts.length ?? 0) > 0 && (
+              <select
+                value=""
+                onChange={(e) => {
+                  if (e.target.value) void handleUseSavedAccount(e.target.value);
+                }}
+                className="rounded-lg bg-surface-950 border border-indigo-500/40 px-3 py-1.5 text-xs text-indigo-200"
+              >
+                <option value="">Load Saved Account...</option>
+                {overview?.saved_accounts.map((acc) => (
+                  <option key={acc.username} value={acc.username}>
+                    {acc.username}
+                    {acc.notes ? ` — ${acc.notes}` : ""}
+                  </option>
+                ))}
+              </select>
+            )}
+            <select
+              value={selectedHostId}
+              onChange={(e) => handleSelectHost(e.target.value)}
+              className="rounded-lg bg-surface-950 border border-slate-700 px-3 py-1.5 text-xs text-slate-200"
             >
-              {deployingSsh ? "Deploying..." : "One-Button SSH Deploy"}
-            </button>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-            <input
-              value={sshForm.ssh_username}
-              onChange={(e) => setSshForm({ ...sshForm, ssh_username: e.target.value })}
-              placeholder="SSH username (e.g. root)"
-              className="rounded-lg bg-surface-950 border border-slate-700 px-3 py-1.5 text-xs font-mono text-white"
-            />
-            <input
-              type="password"
-              value={sshForm.ssh_password}
-              onChange={(e) => setSshForm({ ...sshForm, ssh_password: e.target.value })}
-              placeholder="SSH password"
-              className="rounded-lg bg-surface-950 border border-slate-700 px-3 py-1.5 text-xs font-mono text-white"
-            />
-            <input
-              type="number"
-              value={sshForm.ssh_port}
-              onChange={(e) => setSshForm({ ...sshForm, ssh_port: Number(e.target.value) })}
-              placeholder="22"
-              className="rounded-lg bg-surface-950 border border-slate-700 px-3 py-1.5 text-xs font-mono text-white"
-            />
-            <label className="inline-flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={sshForm.save_credentials}
-                onChange={(e) =>
-                  setSshForm({ ...sshForm, save_credentials: e.target.checked })
-                }
-                className="rounded border-slate-600 bg-surface-950 text-emerald-500"
-              />
-              Save encrypted password
-            </label>
-          </div>
-
-          {sshResult && (
-            <div
-              className={`rounded-lg border p-3 text-xs space-y-1 ${
-                sshResult.ok
-                  ? "border-emerald-500/40 bg-surface-950 text-emerald-300"
-                  : "border-rose-500/40 bg-surface-950 text-rose-300"
-              }`}
-            >
-              <div className="font-semibold">
-                {sshResult.ok
-                  ? `Deployed to ${sshResult.virtual_ups_name}@${sshResult.server_host}:${sshResult.nut_port}`
-                  : sshResult.error}
-              </div>
-              {sshResult.steps.map((s, i) => (
-                <div key={i} className="font-mono text-slate-300">
-                  • {s}
-                </div>
+              <option value="">Select Managed Host (recommended)...</option>
+              {hosts.map((h) => (
+                <option key={h.id} value={h.id}>
+                  {h.name} ({h.ip_or_host}) → {h.virtual_ups_name || h.name}
+                </option>
               ))}
-            </div>
-          )}
+            </select>
+          </div>
         </div>
 
         {/* Platform Tabs */}
@@ -685,6 +826,85 @@ export function NutClientsPage({
             ))}
           </div>
         )}
+
+        {/* One-Button SSH Deploy Strip (Underneath client configuration & generator) */}
+        <div className="pt-4 border-t border-slate-800">
+          <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <div className="text-xs font-semibold text-emerald-300">
+                  One-Button Remote SSH/SFTP Deploy (Linux / Proxmox)
+                </div>
+                <div className="text-[11px] text-slate-400 mt-0.5">
+                  {selectedHostId
+                    ? "Installs nut-client, uploads nut.conf & upsmon.conf with the credentials above, and starts nut-monitor."
+                    : "Select a Managed Host in the dropdown above to enable remote SSH/SFTP deployment."}
+                </div>
+              </div>
+              <button
+                onClick={() => void handleOneButtonSshDeploy()}
+                disabled={deployingSsh || !selectedHostId || !sshForm.ssh_password.trim()}
+                className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-medium text-white disabled:opacity-50 shrink-0"
+              >
+                {deployingSsh ? "Deploying..." : "One-Button SSH Deploy"}
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+              <input
+                value={sshForm.ssh_username}
+                onChange={(e) => setSshForm({ ...sshForm, ssh_username: e.target.value })}
+                placeholder="SSH username (e.g. root)"
+                className="rounded-lg bg-surface-950 border border-slate-700 px-3 py-1.5 text-xs font-mono text-white"
+              />
+              <input
+                type="password"
+                value={sshForm.ssh_password}
+                onChange={(e) => setSshForm({ ...sshForm, ssh_password: e.target.value })}
+                placeholder="SSH password"
+                className="rounded-lg bg-surface-950 border border-slate-700 px-3 py-1.5 text-xs font-mono text-white"
+              />
+              <input
+                type="number"
+                value={sshForm.ssh_port}
+                onChange={(e) => setSshForm({ ...sshForm, ssh_port: Number(e.target.value) })}
+                placeholder="22"
+                className="rounded-lg bg-surface-950 border border-slate-700 px-3 py-1.5 text-xs font-mono text-white"
+              />
+              <label className="inline-flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={sshForm.save_credentials}
+                  onChange={(e) =>
+                    setSshForm({ ...sshForm, save_credentials: e.target.checked })
+                  }
+                  className="rounded border-slate-600 bg-surface-950 text-emerald-500"
+                />
+                Save encrypted password
+              </label>
+            </div>
+
+            {sshResult && (
+              <div
+                className={`rounded-lg border p-3 text-xs space-y-1 ${
+                  sshResult.ok
+                    ? "border-emerald-500/40 bg-surface-950 text-emerald-300"
+                    : "border-rose-500/40 bg-surface-950 text-rose-300"
+                }`}
+              >
+                <div className="font-semibold">
+                  {sshResult.ok
+                    ? `Deployed to ${sshResult.virtual_ups_name}@${sshResult.server_host}:${sshResult.nut_port}`
+                    : sshResult.error}
+                </div>
+                {sshResult.steps.map((s, i) => (
+                  <div key={i} className="font-mono text-slate-300">
+                    • {s}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );

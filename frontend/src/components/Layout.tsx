@@ -100,7 +100,7 @@ export function Layout({
   return (
     <div className="min-h-screen bg-surface-950 text-slate-100 flex flex-col lg:flex-row">
       {/* Sidebar */}
-      <aside className="w-full lg:w-64 bg-surface-900 border-b lg:border-b-0 lg:border-r border-slate-800/80 flex flex-col shrink-0">
+      <aside className="w-full lg:w-64 lg:sticky lg:top-0 lg:h-screen bg-surface-900 border-b lg:border-b-0 lg:border-r border-slate-800/80 flex flex-col shrink-0">
         <div className="px-5 py-4 border-b border-slate-800/80 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="h-9 w-9 rounded-lg bg-indigo-500/20 border border-indigo-400/30 flex items-center justify-center text-indigo-400">
@@ -122,7 +122,7 @@ export function Layout({
               className="lg:hidden inline-flex items-center gap-1 px-2 py-0.5 rounded bg-surface-800 hover:bg-surface-700 border border-slate-700/80 text-[11px] text-slate-300 disabled:opacity-50"
             >
               <RefreshCw className={`h-3 w-3 ${checkingUpdates ? "animate-spin" : ""}`} />
-              <span>v{versionStatus?.current_version ?? "2.2.3"}</span>
+              <span>v{versionStatus?.current_version ?? "2.2.4"}</span>
             </button>
             <span
               title={wsConnected ? "Live WebSocket Connected" : "Reconnecting..."}
@@ -138,7 +138,7 @@ export function Layout({
           </div>
         </div>
 
-        <nav className="p-3 flex lg:flex-col gap-1 overflow-x-auto">
+        <nav className="p-3 flex lg:flex-col gap-1 overflow-x-auto lg:flex-1 lg:overflow-y-auto">
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             const active = activeTab === item.id;
@@ -197,7 +197,7 @@ export function Layout({
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5">
                 <span className="text-slate-400 font-mono">
-                  v{versionStatus?.current_version ?? "2.2.3"}
+                  v{versionStatus?.current_version ?? "2.2.4"}
                 </span>
                 {versionStatus?.update_available && (
                   <span

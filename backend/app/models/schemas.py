@@ -452,6 +452,9 @@ class NutClientConfigRequest(BaseModel):
     poll_freq: int = Field(default=5, ge=1, le=300)
     deadtime: int = Field(default=15, ge=1, le=600)
     shutdown_cmd: str = Field(default="/sbin/shutdown -h +0", max_length=256)
+    host_id: int | None = None
+    device_name: str = Field(default="", max_length=100)
+    save_record: bool = True
 
 
 class GeneratedConfigFile(BaseModel):
@@ -471,6 +474,30 @@ class NutClientConfigResponse(BaseModel):
     one_liner: str | None = None
     gui_fields: list[GeneratedGuiField] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    record_id: int | None = None
+
+
+class RecordedClientConfigSummary(BaseModel):
+    id: int
+    host_id: int | None = None
+    device_name: str
+    platform: NutClientPlatform
+    server_host: str
+    nut_port: int
+    ups_name: str
+    username: str
+    final_delay: int
+    poll_freq: int
+    deadtime: int
+    shutdown_cmd: str
+    delivery_method: Literal["manual", "ssh_deploy"]
+    deploy_status: Literal["generated", "deployed", "failed"]
+    created_at: str
+    updated_at: str
+
+
+class RecordedClientConfigDetail(RecordedClientConfigSummary):
+    config: NutClientConfigResponse
 
 
 # --- Orchestrator Models ---
@@ -504,6 +531,31 @@ class OrchestratorStateModel(BaseModel):
 
 class SimulateRecoveryRequest(BaseModel):
     dry_run: bool = True
+    scope: Literal["bulk", "single"] = "bulk"
+    host_ids: list[int] = Field(default_factory=list)
+
+
+class HostTestRunRequest(BaseModel):
+    dry_run: bool = True
+
+
+class HostTestRunResponse(BaseModel):
+    host_id: int
+    host_name: str
+    ip_or_host: str
+    dry_run: bool
+    reachable: bool
+    check_method: str
+    virtual_ups_name: str
+    nut_client_connected: bool
+    current_battery_charge: float | None = None
+    effective_wake_battery_pct: float
+    would_wake_now: bool
+    wol_targets: list[str] = Field(default_factory=list)
+    shutdown_rule_summary: str
+    disconnect_rule_summary: str
+    started_live_wake: bool = False
+    notes: list[str] = Field(default_factory=list)
 
 
 # --- Notification Models ---

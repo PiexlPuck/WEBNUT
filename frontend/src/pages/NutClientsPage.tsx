@@ -7,21 +7,26 @@ import {
   Copy,
   Eye,
   EyeOff,
+  FileText,
   KeyRound,
   Link2,
   RefreshCw,
   Server,
   Terminal,
   Trash2,
+  Upload,
   UserCheck,
 } from "lucide-react";
 import { api, ApiError } from "../api/client";
+import { Modal } from "../components/Modal";
 import type {
   HostRecord,
   NutClientConfigRequest,
   NutClientConfigResponse,
   NutClientPlatform,
   NutClientsOverview,
+  RecordedClientConfigDetail,
+  RecordedClientConfigSummary,
   SshDeployResponse,
   TelemetrySnapshot,
 } from "../types";
@@ -85,11 +90,21 @@ export function NutClientsPage({
   const [deployingSsh, setDeployingSsh] = useState(false);
   const [sshResult, setSshResult] = useState<SshDeployResponse | null>(null);
 
+  // Recorded client configs vault state
+  const [deviceName, setDeviceName] = useState("");
+  const [recordedConfigs, setRecordedConfigs] = useState<RecordedClientConfigSummary[]>([]);
+  const [viewingConfig, setViewingConfig] = useState<RecordedClientConfigDetail | null>(null);
+  const [loadingConfigId, setLoadingConfigId] = useState<number | null>(null);
+
   const loadOverview = useCallback(async () => {
     setLoadingOverview(true);
     try {
-      const data = await api.getNutClients();
+      const [data, configs] = await Promise.all([
+        api.getNutClients(),
+        api.getRecordedClientConfigs(),
+      ]);
       setOverview(data);
+      setRecordedConfigs(configs);
       setForm((prev) => ({
         ...prev,
         server_host: prev.server_host || data.server_ip,
@@ -115,6 +130,7 @@ export function NutClientsPage({
   const applyHostSelection = useCallback(
     (h: HostRecord) => {
       setSelectedHostId(String(h.id));
+      setDeviceName(h.name);
       setForm((prev) => ({
         ...prev,
         platform: h.nut_client_platform || prev.platform,
@@ -308,18 +324,97 @@ export function NutClientsPage({
     if (!form.password.trim()) {
       setUserFeedback({
         ok: false,
-        msg: "Enter a password (or click 'Create Secondary User' to generate one).",
+        msg: "Enter a password (or save/select a monitor account above).",
       });
       return;
     }
     try {
-      const res = await api.generateNutClientConfig(form);
+      const res = await api.generateNutClientConfig({
+        ...form,
+        host_id: selectedHostId ? Number(selectedHostId) : null,
+        device_name: deviceName.trim(),
+        save_record: true,
+      });
       setGenerated(res);
+      const configs = await api.getRecordedClientConfigs();
+      setRecordedConfigs(configs);
+      setUserFeedback({
+        ok: true,
+        msg: `Generated and recorded client configuration for '${deviceName.trim() || form.ups_name}'.`,
+      });
     } catch (err) {
       setUserFeedback({
         ok: false,
         msg: err instanceof ApiError ? err.message : "Failed to generate client config",
       });
+    }
+  };
+
+  const handleViewRecordedConfig = async (id: number) => {
+    setLoadingConfigId(id);
+    try {
+      const detail = await api.getRecordedClientConfig(id);
+      setViewingConfig(detail);
+    } catch (err) {
+      setUserFeedback({
+        ok: false,
+        msg: err instanceof ApiError ? err.message : "Failed to load recorded config",
+      });
+    } finally {
+      setLoadingConfigId(null);
+    }
+  };
+
+  const handleLoadRecordedConfig = async (rec: RecordedClientConfigSummary) => {
+    if (rec.host_id) {
+      const h = hosts.find((item) => item.id === rec.host_id);
+      if (h) applyHostSelection(h);
+      else setSelectedHostId(String(rec.host_id));
+    } else {
+      setSelectedHostId("");
+    }
+    setDeviceName(rec.device_name);
+    let pw = revealedPasswords[rec.username] ?? "";
+    if (!pw && overview?.saved_accounts.some((a) => a.username === rec.username)) {
+      try {
+        pw = await fetchAccountPassword(rec.username);
+      } catch {
+        pw = "";
+      }
+    }
+    setForm((prev) => ({
+      ...prev,
+      platform: rec.platform,
+      server_host: rec.server_host,
+      nut_port: rec.nut_port,
+      ups_name: rec.ups_name,
+      username: rec.username,
+      password: pw || prev.password,
+      final_delay: rec.final_delay,
+      poll_freq: rec.poll_freq,
+      deadtime: rec.deadtime,
+      shutdown_cmd: rec.shutdown_cmd,
+    }));
+    setUserFeedback({
+      ok: true,
+      msg: `Loaded recorded config for '${rec.device_name}' into Client Setup.`,
+    });
+  };
+
+  const handleDeleteRecordedConfig = async (id: number, name: string) => {
+    setLoadingConfigId(id);
+    try {
+      await api.deleteRecordedClientConfig(id);
+      setRecordedConfigs((prev) => prev.filter((item) => item.id !== id));
+      if (viewingConfig?.id === id) setViewingConfig(null);
+      setUserFeedback({ ok: true, msg: `Deleted recorded config for '${name}'.` });
+    } catch (err) {
+      setUserFeedback({
+        ok: false,
+        msg: err instanceof ApiError ? err.message : "Failed to delete recorded config",
+      });
+    } finally {
+      setLoadingConfigId(null);
     }
   };
 
@@ -689,6 +784,17 @@ export function NutClientsPage({
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <div>
+            <label className="block text-xs text-slate-400 mb-1">
+              Device Name (saved in registry)
+            </label>
+            <input
+              value={deviceName}
+              onChange={(e) => setDeviceName(e.target.value)}
+              placeholder={form.ups_name || "e.g. proxmox-01 or TrueNAS"}
+              className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-sm text-white"
+            />
+          </div>
+          <div>
             <label className="block text-xs text-slate-400 mb-1">WebNUT Repeater IP</label>
             <input
               value={form.server_host}
@@ -914,6 +1020,218 @@ export function NutClientsPage({
           </div>
         </div>
       </div>
+
+      {/* Recorded Device Client Configs Registry */}
+      <div className="rounded-2xl border border-slate-800 bg-surface-900 overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <FileText className="h-4 w-4 text-sky-400" />
+            <div>
+              <h3 className="text-sm font-semibold text-white">
+                Recorded Device Client Configs
+              </h3>
+              <p className="text-xs text-slate-400">
+                Every generated manual config and SSH-deployed setup is encrypted and saved per
+                device
+              </p>
+            </div>
+          </div>
+          <span className="text-xs font-mono text-slate-400">
+            {recordedConfigs.length} recorded
+          </span>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead className="bg-surface-950/60 text-[11px] uppercase text-slate-400 border-b border-slate-800">
+              <tr>
+                <th className="px-4 py-3">Device</th>
+                <th className="px-4 py-3">Platform</th>
+                <th className="px-4 py-3">Repeater Stream</th>
+                <th className="px-4 py-3">Account</th>
+                <th className="px-4 py-3">Delivery &amp; Status</th>
+                <th className="px-4 py-3">Updated</th>
+                <th className="px-4 py-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/70">
+              {recordedConfigs.map((rec) => {
+                const platLabel =
+                  PLATFORMS.find((p) => p.id === rec.platform)?.label ?? rec.platform;
+                const isBusy = loadingConfigId === rec.id;
+                return (
+                  <tr key={rec.id} className="hover:bg-surface-800/40">
+                    <td className="px-4 py-3 font-medium text-white">{rec.device_name}</td>
+                    <td className="px-4 py-3 text-slate-300">{platLabel}</td>
+                    <td className="px-4 py-3 font-mono text-sky-300">
+                      {rec.ups_name}@{rec.server_host}:{rec.nut_port}
+                    </td>
+                    <td className="px-4 py-3 font-mono text-slate-300">{rec.username}</td>
+                    <td className="px-4 py-3">
+                      <span
+                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium border ${
+                          rec.deploy_status === "deployed"
+                            ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                            : rec.deploy_status === "failed"
+                            ? "bg-rose-500/15 text-rose-300 border-rose-500/30"
+                            : "bg-indigo-500/15 text-indigo-300 border-indigo-500/30"
+                        }`}
+                      >
+                        {rec.delivery_method === "ssh_deploy"
+                          ? rec.deploy_status === "deployed"
+                            ? "SSH Deployed"
+                            : "SSH Failed"
+                          : "Manual Config"}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-slate-400">
+                      {new Date(rec.updated_at).toLocaleString()}
+                    </td>
+                    <td className="px-4 py-3 text-right whitespace-nowrap space-x-1">
+                      <button
+                        onClick={() => void handleViewRecordedConfig(rec.id)}
+                        disabled={isBusy}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-surface-800 hover:bg-surface-700 border border-slate-700 text-slate-200 disabled:opacity-50"
+                      >
+                        <Eye className="h-3 w-3" />
+                        View Config
+                      </button>
+                      <button
+                        onClick={() => void handleLoadRecordedConfig(rec)}
+                        disabled={isBusy}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-indigo-300 disabled:opacity-50"
+                      >
+                        <Upload className="h-3 w-3" />
+                        Load
+                      </button>
+                      <button
+                        onClick={() => void handleDeleteRecordedConfig(rec.id, rec.device_name)}
+                        disabled={isBusy}
+                        title="Delete recorded config"
+                        className="p-1.5 rounded bg-surface-800 hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 disabled:opacity-50"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+              {recordedConfigs.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="p-6 text-center text-slate-500">
+                    No device client configs recorded yet. Generate a manual config or run
+                    One-Button SSH Deploy above to record it automatically.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Recorded Config Detail Modal */}
+      <Modal
+        open={viewingConfig !== null}
+        title={
+          viewingConfig
+            ? `Recorded NUT Client Config — ${viewingConfig.device_name}`
+            : "Recorded Config"
+        }
+        onClose={() => setViewingConfig(null)}
+        maxWidth="max-w-3xl"
+      >
+        {viewingConfig && (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400 border-b border-slate-800 pb-3">
+              <div>
+                Stream:{" "}
+                <span className="font-mono text-sky-300">
+                  {viewingConfig.ups_name}@{viewingConfig.server_host}:{viewingConfig.nut_port}
+                </span>{" "}
+                • Account: <span className="font-mono text-white">{viewingConfig.username}</span>
+              </div>
+              <span>Updated {new Date(viewingConfig.updated_at).toLocaleString()}</span>
+            </div>
+
+            {viewingConfig.config.gui_fields.length > 0 && (
+              <div className="rounded-xl border border-slate-800 bg-surface-950 divide-y divide-slate-800/70">
+                {viewingConfig.config.gui_fields.map((gf) => (
+                  <div
+                    key={gf.label}
+                    className="px-4 py-2 flex items-center justify-between text-xs"
+                  >
+                    <span className="text-slate-400">{gf.label}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-white">{gf.value}</span>
+                      <button
+                        onClick={() => void copyText(`rec-gf-${gf.label}`, gf.value)}
+                        className="p-1 rounded bg-surface-800 text-slate-300"
+                      >
+                        {copiedKey === `rec-gf-${gf.label}` ? (
+                          <Check className="h-3 w-3 text-emerald-400" />
+                        ) : (
+                          <Copy className="h-3 w-3" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {viewingConfig.config.one_liner && (
+              <div className="rounded-xl border border-slate-800 bg-surface-950 overflow-hidden">
+                <div className="px-4 py-2 border-b border-slate-800 flex items-center justify-between">
+                  <span className="text-xs font-semibold text-indigo-300">
+                    One-Click Setup Script
+                  </span>
+                  <button
+                    onClick={() =>
+                      void copyText("rec-one-liner", viewingConfig.config.one_liner!)
+                    }
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-surface-800 text-xs text-slate-200"
+                  >
+                    {copiedKey === "rec-one-liner" ? (
+                      <Check className="h-3.5 w-3.5 text-emerald-400" />
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                    Copy Script
+                  </button>
+                </div>
+                <pre className="p-3.5 text-xs font-mono text-slate-200 overflow-x-auto whitespace-pre-wrap">
+                  {viewingConfig.config.one_liner}
+                </pre>
+              </div>
+            )}
+
+            {viewingConfig.config.files.map((f) => (
+              <div
+                key={f.path}
+                className="rounded-xl border border-slate-800 bg-surface-950 overflow-hidden"
+              >
+                <div className="px-4 py-2 border-b border-slate-800 flex items-center justify-between">
+                  <span className="text-xs font-mono text-slate-300">{f.path}</span>
+                  <button
+                    onClick={() => void copyText(`rec-file-${f.path}`, f.content)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-surface-800 text-xs text-slate-200"
+                  >
+                    {copiedKey === `rec-file-${f.path}` ? (
+                      <Check className="h-3.5 w-3.5 text-emerald-400" />
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                    Copy
+                  </button>
+                </div>
+                <pre className="p-3.5 text-xs font-mono text-slate-300 overflow-x-auto whitespace-pre-wrap">
+                  {f.content}
+                </pre>
+              </div>
+            ))}
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

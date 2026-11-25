@@ -205,3 +205,97 @@ async def test_monitor_account_persistence_reveal_and_delete(db, event_log, tmp_
         disk_users = parse_upsd_users((nut_dir / "upsd.users").read_text(encoding="utf-8"), mask_secrets=False)
         assert all(u.username != "proxmox_mon" for u in disk_users.users)
 
+
+@pytest.mark.asyncio
+async def test_recorded_client_configs_store_and_endpoints(db, event_log, tmp_path: Path) -> None:
+    from types import SimpleNamespace
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api.nut import router as nut_router
+    from app.services.crypto import SecretBox
+    from app.wol.orchestrator import RecoveryOrchestrator
+    from app.notifications.dispatcher import NotificationDispatcher
+    from app.nut.client import NutTcpClient
+
+    nut_dir = tmp_path / "nut_rec"
+    nut_dir.mkdir()
+    (nut_dir / "nut.conf").write_text("MODE=netserver\n", encoding="utf-8")
+    (nut_dir / "ups.conf").write_text("[ups1]\n  driver = usbhid-ups\n  port = auto\n", encoding="utf-8")
+    (nut_dir / "upsd.users").write_text("[admin]\n  password = adminpw\n  actions = SET\n", encoding="utf-8")
+
+    mgr = NutConfigManager(nut_dir, _OkSupervisor(), event_log)  # type: ignore[arg-type]
+    secret_box = SecretBox(tmp_path)
+    dispatcher = NotificationDispatcher(db, event_log)
+    orch = RecoveryOrchestrator(db=db, nut_client=NutTcpClient(), dispatcher=dispatcher, event_log=event_log)
+
+    app = FastAPI()
+    app.include_router(nut_router)
+    app.state.db = db
+    app.state.nut_manager = mgr
+    app.state.secret_box = secret_box
+    app.state.orchestrator = orch
+    app.state.event_log = event_log
+    app.state.supervisor = _OkSupervisor()
+    app.state.nut_client = NutTcpClient()
+    app.state.repeater = None
+    app.state.ws_hub = SimpleNamespace(broadcast=lambda *_args, **_kwargs: None)
+
+    with TestClient(app) as client:
+        gen_res = client.post(
+            "/api/nut/clients/generate",
+            json={
+                "platform": "linux_debian",
+                "server_host": "192.168.1.250",
+                "nut_port": 3493,
+                "ups_name": "proxmox_1",
+                "username": "monuser",
+                "password": "RecordedConfigPassword!1",
+                "device_name": "Proxmox-Node-1",
+                "save_record": True,
+            },
+        )
+        assert gen_res.status_code == 200
+        body = gen_res.json()
+        assert body["record_id"] is not None
+        rec_id = body["record_id"]
+
+        # Verify encrypted at rest in SQLite
+        row = await db.fetch_one("SELECT * FROM nut_client_configs WHERE id = ?", (rec_id,))
+        assert row is not None
+        assert row["device_name"] == "Proxmox-Node-1"
+        assert "RecordedConfigPassword!1" not in row["config_payload_enc"]
+
+        # List endpoint returns summary without encrypted blob
+        listed = client.get("/api/nut/clients/configs").json()
+        assert len(listed) == 1
+        assert listed[0]["device_name"] == "Proxmox-Node-1"
+        assert listed[0]["delivery_method"] == "manual"
+        assert "config_payload_enc" not in listed[0]
+
+        # Detail endpoint decrypts config files & one-liner
+        detail = client.get(f"/api/nut/clients/configs/{rec_id}").json()
+        assert any("RecordedConfigPassword!1" in f["content"] for f in detail["config"]["files"])
+
+        # Re-generating for same device updates existing record rather than duplicating
+        gen2 = client.post(
+            "/api/nut/clients/generate",
+            json={
+                "platform": "linux_debian",
+                "server_host": "192.168.1.250",
+                "nut_port": 3493,
+                "ups_name": "proxmox_1",
+                "username": "monuser",
+                "password": "UpdatedConfigPassword!2",
+                "device_name": "Proxmox-Node-1",
+                "save_record": True,
+            },
+        ).json()
+        assert gen2["record_id"] == rec_id
+        assert len(client.get("/api/nut/clients/configs").json()) == 1
+
+        # Delete recorded config
+        assert client.delete(f"/api/nut/clients/configs/{rec_id}").status_code == 200
+        assert client.get("/api/nut/clients/configs").json() == []
+
+

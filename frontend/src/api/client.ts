@@ -6,6 +6,7 @@ import type {
   HardwareScanResponse,
   HostPayload,
   HostRecord,
+  HostTestRunResponse,
   MonitorAccountRevealResponse,
   NotificationRuleItem,
   NotificationSettings,
@@ -21,6 +22,8 @@ import type {
   OrchestratorState,
   PushoverConfigPayload,
   PushoverConfigView,
+  RecordedClientConfigDetail,
+  RecordedClientConfigSummary,
   RepeaterStatusResponse,
   ScannedSnmpDevice,
   ScannedUsbDevice,
@@ -145,6 +148,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  getRecordedClientConfigs: () =>
+    request<RecordedClientConfigSummary[]>("/api/nut/clients/configs"),
+  getRecordedClientConfig: (id: number) =>
+    request<RecordedClientConfigDetail>(`/api/nut/clients/configs/${id}`),
+  deleteRecordedClientConfig: (id: number) =>
+    request<{ deleted: boolean; id: number }>(`/api/nut/clients/configs/${id}`, {
+      method: "DELETE",
+    }),
 
   // Hosts
   getHosts: () => request<HostRecord[]>("/api/hosts"),
@@ -163,6 +174,11 @@ export const api = {
     request<{ started: boolean; host_id: number }>(`/api/hosts/${id}/wake`, {
       method: "POST",
       body: JSON.stringify({ track_retries: trackRetries }),
+    }),
+  testRunHost: (id: number, dryRun = true) =>
+    request<HostTestRunResponse>(`/api/hosts/${id}/test-run`, {
+      method: "POST",
+      body: JSON.stringify({ dry_run: dryRun }),
     }),
   testHostSsh: (
     id: number,
@@ -186,10 +202,14 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(cfg),
     }),
-  simulateRecovery: (dryRun: boolean) =>
+  simulateRecovery: (
+    dryRun: boolean,
+    scope: "bulk" | "single" = "bulk",
+    hostIds: number[] = []
+  ) =>
     request<OrchestratorState>("/api/orchestrator/simulate-recovery", {
       method: "POST",
-      body: JSON.stringify({ dry_run: dryRun }),
+      body: JSON.stringify({ dry_run: dryRun, scope, host_ids: hostIds }),
     }),
 
   // Notifications

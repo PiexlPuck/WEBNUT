@@ -11,16 +11,25 @@ from app.models.schemas import (
     SECRET_MASK,
     ArpLookupRequest,
     ArpLookupResponse,
+    GeneratedConfigFile,
     HostCreate,
     HostRecord,
+    HostTestRunRequest,
+    HostTestRunResponse,
     HostUpdate,
     ManualWakeRequest,
+    NutClientConfigResponse,
     SshDeployRequest,
     SshDeployResponse,
     SshTestRequest,
 )
 from app.nut.client_config import detect_local_lan_ip
-from app.services.ssh_deployer import deploy_nut_client_ssh, test_ssh_connection
+from app.nut.client_config_store import upsert_client_config_record
+from app.services.ssh_deployer import (
+    build_remote_client_files,
+    deploy_nut_client_ssh,
+    test_ssh_connection,
+)
 from app.wol.magic_packet import normalize_mac
 from app.wol.network import resolve_mac_from_arp
 
@@ -331,6 +340,20 @@ async def wake_host_now(
     return {"started": True, "host_id": host_id, "track_retries": payload.track_retries}
 
 
+@router.post("/{host_id}/test-run", response_model=HostTestRunResponse)
+async def test_run_host(
+    host_id: int,
+    payload: HostTestRunRequest,
+    request: Request,
+) -> HostTestRunResponse:
+    orchestrator = request.app.state.orchestrator
+    try:
+        res = await orchestrator.test_run_host(host_id, dry_run=payload.dry_run)
+        return HostTestRunResponse(**res)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/{host_id}/test-ssh")
 async def test_host_ssh(host_id: int, payload: SshTestRequest, request: Request) -> dict:
     db = request.app.state.db
@@ -449,6 +472,51 @@ async def deploy_host_nut_client(
             """,
             (virtual_ups, payload.nut_username.strip(), now, host_id),
         )
+
+    nut_conf_txt, upsmon_conf_txt = build_remote_client_files(
+        server_host=repeater_ip,
+        nut_port=repeater_port,
+        ups_name=virtual_ups,
+        username=nut_username,
+        password=nut_password,
+        final_delay=payload.final_delay,
+        shutdown_cmd=payload.shutdown_cmd,
+    )
+    plat_raw = str(host.get("nut_client_platform") or "linux_debian")
+    plat = (
+        plat_raw
+        if plat_raw in ("linux_debian", "linux_rhel", "truenas", "synology", "windows")
+        else "linux_debian"
+    )
+    recorded_cfg = NutClientConfigResponse(
+        platform=plat,  # type: ignore[arg-type]
+        title=f"SSH Deployed Client — {host['name']}",
+        files=[
+            GeneratedConfigFile(path="/etc/nut/nut.conf", content=nut_conf_txt),
+            GeneratedConfigFile(path="/etc/nut/upsmon.conf", content=upsmon_conf_txt),
+        ],
+        one_liner=None,
+        gui_fields=[],
+        notes=[f"SSH target: {payload.ssh_username.strip()}@{host['ip_or_host']}:{payload.ssh_port}"],
+    )
+    await upsert_client_config_record(
+        db,
+        secret_box,
+        host_id=host_id,
+        device_name=str(host["name"]),
+        platform=plat,
+        server_host=repeater_ip,
+        nut_port=repeater_port,
+        ups_name=virtual_ups,
+        username=nut_username,
+        final_delay=payload.final_delay,
+        poll_freq=5,
+        deadtime=15,
+        shutdown_cmd=payload.shutdown_cmd,
+        delivery_method="ssh_deploy",
+        deploy_status="deployed" if result.ok else "failed",
+        config_response=recorded_cfg,
+    )
 
     await request.app.state.event_log.record(
         "hosts",

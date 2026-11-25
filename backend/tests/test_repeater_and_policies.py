@@ -305,3 +305,79 @@ async def test_staged_battery_wol_recovery_per_host(db, event_log) -> None:
         "Proxmox 1": "WAKE_SUCCEEDED",
         "Proxmox 2": "WAKE_SUCCEEDED",
     }
+
+
+@pytest.mark.asyncio
+async def test_individual_host_and_bulk_test_runs(db, event_log) -> None:
+    hid1 = await _insert_v2_host(
+        db,
+        name="Node Alpha",
+        ip="10.0.3.10",
+        mac="AA:BB:CC:33:00:01",
+        virtual_ups_name="node_alpha",
+        wake_min_battery_charge=15.0,
+        shutdown_battery_pct=30.0,
+        disconnect_policy="keep_running",
+        priority=1,
+        was_online=0,
+    )
+    hid2 = await _insert_v2_host(
+        db,
+        name="Node Beta",
+        ip="10.0.3.20",
+        mac="AA:BB:CC:33:00:02",
+        virtual_ups_name="node_beta",
+        wake_min_battery_charge=20.0,
+        shutdown_ob_delay_sec=180,
+        disconnect_policy="shutdown_after_grace",
+        disconnect_grace_sec=300,
+        priority=2,
+        was_online=0,
+    )
+
+    sent_packets: list[str] = []
+    online_ips: set[str] = {"10.0.3.10"}
+
+    def fake_wol(mac: str, _bcast: str | None) -> list[str]:
+        sent_packets.append(mac)
+        online_ips.add("10.0.3.20")
+        return ["255.255.255.255"]
+
+    async def fake_reach(ip: str, _m: str, _p: int | None, _t: float) -> bool:
+        return ip in online_ips
+
+    dispatcher = NotificationDispatcher(db, event_log)
+    orch = RecoveryOrchestrator(
+        db=db,
+        nut_client=NutTcpClient(),
+        dispatcher=dispatcher,
+        event_log=event_log,
+        reachability_fn=fake_reach,
+        wol_sender=fake_wol,
+        check_poll_step=0.05,
+    )
+
+    # 1. Individual host dry-run reports diagnostics without sending WoL
+    dry_res = await orch.test_run_host(hid1, dry_run=True)
+    assert dry_res["host_id"] == hid1
+    assert dry_res["dry_run"] is True
+    assert dry_res["reachable"] is True
+    assert dry_res["started_live_wake"] is False
+    assert "30%" in dry_res["shutdown_rule_summary"]
+    assert "Keep running" in dry_res["disconnect_rule_summary"]
+    assert sent_packets == []
+
+    # 2. Individual host live test sends WoL only for hid2
+    live_res = await orch.test_run_host(hid2, dry_run=False)
+    assert live_res["started_live_wake"] is True
+    if hid2 in orch._manual_tasks:
+        await asyncio.wait_for(orch._manual_tasks[hid2], timeout=3.0)
+    assert sent_packets == ["AA:BB:CC:33:00:02"]
+
+    # 3. Bulk dry-run targeting only specific host IDs runs cleanly without sending WoL
+    sent_packets.clear()
+    await orch.simulate_recovery(dry_run=True, scope="bulk", host_ids=[hid1])
+    if orch._recovery_task is not None:
+        await asyncio.wait_for(orch._recovery_task, timeout=3.0)
+    assert sent_packets == []
+

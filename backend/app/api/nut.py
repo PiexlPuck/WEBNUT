@@ -28,6 +28,8 @@ from app.models.schemas import (
     NutConnectionTestRequest,
     NutConnectionTestResponse,
     NutServiceStatus,
+    RecordedClientConfigDetail,
+    RecordedClientConfigSummary,
     RepeaterStatusResponse,
     SavedMonitorAccount,
     ScannedSnmpDevice,
@@ -38,6 +40,12 @@ from app.models.schemas import (
 )
 from app.nut.client import NutTcpClient
 from app.nut.client_config import detect_local_lan_ip, generate_client_config
+from app.nut.client_config_store import (
+    delete_client_config_record,
+    get_client_config_record,
+    list_client_config_records,
+    upsert_client_config_record,
+)
 from app.nut.manager import NutConfigApplyError
 from app.nut.parser import parse_nut_conf, parse_ups_conf, parse_upsd_conf, parse_upsmon_conf
 from app.nut.scanner import scan_all_hardware, scan_snmp_ups, scan_usb_ups
@@ -705,8 +713,77 @@ async def delete_monitor_account(username: str, request: Request) -> dict:
 
 
 @router.post("/clients/generate", response_model=NutClientConfigResponse)
-async def generate_nut_client_config(payload: NutClientConfigRequest) -> NutClientConfigResponse:
+async def generate_nut_client_config(
+    payload: NutClientConfigRequest, request: Request
+) -> NutClientConfigResponse:
     try:
-        return generate_client_config(payload)
+        result = generate_client_config(payload)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    db = getattr(request.app.state, "db", None)
+    secret_box = getattr(request.app.state, "secret_box", None)
+    if payload.save_record and db is not None and secret_box is not None:
+        dev_name = payload.device_name.strip()
+        if not dev_name and payload.host_id is not None:
+            host_row = await db.fetch_one("SELECT name FROM hosts WHERE id = ?", (payload.host_id,))
+            if host_row is not None:
+                dev_name = str(host_row["name"])
+        if not dev_name:
+            dev_name = payload.ups_name.strip()
+
+        rec_id = await upsert_client_config_record(
+            db,
+            secret_box,
+            host_id=payload.host_id,
+            device_name=dev_name,
+            platform=payload.platform,
+            server_host=payload.server_host,
+            nut_port=payload.nut_port,
+            ups_name=payload.ups_name,
+            username=payload.username,
+            final_delay=payload.final_delay,
+            poll_freq=payload.poll_freq,
+            deadtime=payload.deadtime,
+            shutdown_cmd=payload.shutdown_cmd,
+            delivery_method="manual",
+            deploy_status="generated",
+            config_response=result,
+        )
+        result.record_id = rec_id
+        event_log = getattr(request.app.state, "event_log", None)
+        if event_log is not None:
+            await event_log.record(
+                "nut_config",
+                "info",
+                "client_config_recorded",
+                f"Recorded {payload.platform} client config for '{dev_name}' ({payload.ups_name}@{payload.server_host}:{payload.nut_port})",
+                {"record_id": rec_id, "device_name": dev_name, "platform": payload.platform},
+            )
+
+    return result
+
+
+@router.get("/clients/configs", response_model=list[RecordedClientConfigSummary])
+async def get_recorded_client_configs(request: Request) -> list[RecordedClientConfigSummary]:
+    return await list_client_config_records(request.app.state.db)
+
+
+@router.get("/clients/configs/{config_id}", response_model=RecordedClientConfigDetail)
+async def get_recorded_client_config_detail(
+    config_id: int, request: Request
+) -> RecordedClientConfigDetail:
+    detail = await get_client_config_record(
+        request.app.state.db, request.app.state.secret_box, config_id
+    )
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Recorded client config not found")
+    return detail
+
+
+@router.delete("/clients/configs/{config_id}")
+async def remove_recorded_client_config(config_id: int, request: Request) -> dict:
+    deleted = await delete_client_config_record(request.app.state.db, config_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Recorded client config not found")
+    return {"deleted": True, "id": config_id}

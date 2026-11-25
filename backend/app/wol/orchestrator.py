@@ -955,19 +955,33 @@ class RecoveryOrchestrator:
 
         return False
 
-    async def run_recovery_sequence(self, dry_run: bool = False) -> None:
+    async def run_recovery_sequence(
+        self, dry_run: bool = False, target_host_ids: list[int] | None = None
+    ) -> None:
         """Execute staged battery-threshold + staggered WoL recovery sequence."""
         cancelled = False
         worker_tasks: list[asyncio.Task[bool]] = []
         try:
             cfg = await self.get_config()
-            eligible = await self.db.fetch_all(
-                """
-                SELECT * FROM hosts
-                WHERE enabled = 1 AND (was_online_before_outage = 1 OR always_wake = 1)
-                ORDER BY COALESCE(wake_min_battery_charge, 0) ASC, boot_priority ASC, id ASC
-                """
-            )
+            clean_ids = [int(hid) for hid in (target_host_ids or []) if int(hid) > 0]
+            if clean_ids:
+                placeholders = ",".join("?" for _ in clean_ids)
+                eligible = await self.db.fetch_all(
+                    f"""
+                    SELECT * FROM hosts
+                    WHERE id IN ({placeholders})
+                    ORDER BY COALESCE(wake_min_battery_charge, 0) ASC, boot_priority ASC, id ASC
+                    """,
+                    tuple(clean_ids),
+                )
+            else:
+                eligible = await self.db.fetch_all(
+                    """
+                    SELECT * FROM hosts
+                    WHERE enabled = 1 AND (was_online_before_outage = 1 OR always_wake = 1)
+                    ORDER BY COALESCE(wake_min_battery_charge, 0) ASC, boot_priority ASC, id ASC
+                    """
+                )
             if not eligible:
                 await self.event_log.record(
                     "orchestrator",
@@ -1109,10 +1123,137 @@ class RecoveryOrchestrator:
 
         self._manual_tasks[host_id] = asyncio.create_task(_runner(), name=f"manual-wake-{host_id}")
 
-    async def simulate_recovery(self, dry_run: bool = True) -> OrchestratorStateModel:
-        """Manually trigger a recovery run (dry-run or live) for testing."""
+    async def test_run_host(self, host_id: int, dry_run: bool = True) -> dict:
+        """Run a diagnostic dry-run or live single-host WoL test run."""
+        host = await self.db.fetch_one("SELECT * FROM hosts WHERE id = ?", (host_id,))
+        if host is None:
+            raise ValueError(f"Host {host_id} not found")
+
+        cfg = await self.get_config()
+        reachable = await self.reachability_fn(
+            str(host["ip_or_host"]),
+            str(host["check_method"]),
+            host["check_port"],
+            2.0,
+        )
+        vname = make_virtual_ups_name(host)
+
+        host_ip = str(host["ip_or_host"]).strip()
+        connected_ips: set[str] = set()
+        if self.repeater is not None:
+            for c in self.repeater.get_connected_clients():
+                connected_ips.add(str(c.get("client_ip") or "").strip())
+        for u in self._latest_telemetry.get("ups_list") or []:
+            for cip in u.get("connected_clients") or []:
+                connected_ips.add(str(cip).strip())
+        nut_connected = host_ip in connected_ips
+
+        cur_charge = self._current_battery_charge(cfg.monitored_ups)
+        eff_wake = (
+            float(host["wake_min_battery_charge"])
+            if host.get("wake_min_battery_charge") is not None
+            else float(cfg.min_battery_charge)
+        )
+        would_wake = cur_charge is None or float(cur_charge) >= eff_wake
+
+        s_mode = str(host.get("shutdown_mode") or "nut_stream")
+        if s_mode == "disabled":
+            shutdown_summary = "Shutdown disabled"
+        else:
+            parts: list[str] = []
+            if host.get("shutdown_battery_pct") is not None:
+                parts.append(f"<= {float(host['shutdown_battery_pct']):.0f}% battery")
+            if host.get("shutdown_ob_delay_sec") is not None:
+                parts.append(f"after {int(host['shutdown_ob_delay_sec'])}s OB")
+            if not parts:
+                parts.append("on UPS Low Battery (LB)")
+            shutdown_summary = f"{', '.join(parts)} ({s_mode})"
+
+        h_pol = str(host.get("disconnect_policy") or "inherit")
+        eff_pol = cfg.disconnect_policy if h_pol == "inherit" else h_pol
+        h_grace = host.get("disconnect_grace_sec")
+        eff_grace = int(h_grace) if h_grace is not None else int(cfg.disconnect_grace_sec)
+        disconnect_summary = (
+            "Keep running & alert"
+            if eff_pol == "keep_running"
+            else f"Hold OL for {eff_grace}s then shutdown"
+        )
+
+        wol_targets = ["255.255.255.255"]
+        if host.get("subnet_broadcast"):
+            wol_targets.append(str(host["subnet_broadcast"]))
+
+        notes: list[str] = []
+        notes.append(
+            f"Reachability ({host['check_method'].upper()}): {'Online' if reachable else 'Offline'}."
+        )
+        notes.append(
+            f"NUT Repeater Stream '{vname}': {'Connected' if nut_connected else 'Not currently connected'}."
+        )
+        if not would_wake and cur_charge is not None:
+            notes.append(
+                f"Battery check: current {cur_charge:.0f}% < wake minimum {eff_wake:.0f}% (auto-recovery would wait in WAITING_BATTERY)."
+            )
+        else:
+            notes.append(
+                f"Battery check: wake threshold >= {eff_wake:.0f}% OL satisfied."
+            )
+
+        started_live_wake = False
+        if not dry_run:
+            await self.manual_wake_host(host_id, track_retries=True)
+            started_live_wake = True
+            notes.append("Dispatched live WoL magic packet test with retry verification loop.")
+        else:
+            notes.append("Dry-run only: no WoL magic packet transmitted.")
+
+        await self.event_log.record(
+            "orchestrator",
+            "info",
+            "host_test_run",
+            f"{'[DRY RUN] ' if dry_run else ''}Individual host test run for '{host['name']}' ({host_ip})",
+            {
+                "host_id": host_id,
+                "dry_run": dry_run,
+                "reachable": reachable,
+                "nut_client_connected": nut_connected,
+                "would_wake_now": would_wake,
+                "started_live_wake": started_live_wake,
+            },
+        )
+
+        return {
+            "host_id": host_id,
+            "host_name": str(host["name"]),
+            "ip_or_host": host_ip,
+            "dry_run": dry_run,
+            "reachable": reachable,
+            "check_method": str(host["check_method"]),
+            "virtual_ups_name": vname,
+            "nut_client_connected": nut_connected,
+            "current_battery_charge": cur_charge,
+            "effective_wake_battery_pct": eff_wake,
+            "would_wake_now": would_wake,
+            "wol_targets": wol_targets,
+            "shutdown_rule_summary": shutdown_summary,
+            "disconnect_rule_summary": disconnect_summary,
+            "started_live_wake": started_live_wake,
+            "notes": notes,
+        }
+
+    async def simulate_recovery(
+        self,
+        dry_run: bool = True,
+        scope: str = "bulk",
+        host_ids: list[int] | None = None,
+    ) -> OrchestratorStateModel:
+        """Manually trigger a bulk or single-host recovery test run (dry-run or live)."""
         if self._recovery_task is not None and not self._recovery_task.done():
             raise RuntimeError("A recovery sequence is already in progress")
+
+        clean_ids = [int(hid) for hid in (host_ids or []) if int(hid) > 0]
+        target_ids = clean_ids if clean_ids else None
+        scope_label = f"{scope} ({len(clean_ids)} selected host(s))" if clean_ids else "bulk (all eligible hosts)"
 
         now = utc_now_iso()
         await self.db.execute(
@@ -1131,12 +1272,12 @@ class RecoveryOrchestrator:
             "orchestrator",
             "info",
             "recovery_simulation_started",
-            f"Triggered manual recovery sequence ({'dry-run' if dry_run else 'live'})",
-            {"dry_run": dry_run},
+            f"Triggered {scope_label} recovery test run ({'dry-run' if dry_run else 'live'})",
+            {"dry_run": dry_run, "scope": scope, "host_ids": clean_ids},
         )
         await self._broadcast_state()
         self._recovery_task = asyncio.create_task(
-            self.run_recovery_sequence(dry_run=dry_run),
+            self.run_recovery_sequence(dry_run=dry_run, target_host_ids=target_ids),
             name="simulated-recovery",
         )
         return await self.get_state()

@@ -326,6 +326,38 @@ class Database:
             )
             await self.conn.commit()
 
+        if 7 not in applied:
+            now = utc_now_iso()
+            await self.conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS nut_client_configs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    host_id INTEGER,
+                    device_name TEXT NOT NULL,
+                    platform TEXT NOT NULL,
+                    server_host TEXT NOT NULL,
+                    nut_port INTEGER NOT NULL DEFAULT 3493,
+                    ups_name TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    final_delay INTEGER NOT NULL DEFAULT 5,
+                    poll_freq INTEGER NOT NULL DEFAULT 5,
+                    deadtime INTEGER NOT NULL DEFAULT 15,
+                    shutdown_cmd TEXT NOT NULL DEFAULT '/sbin/shutdown -h +0',
+                    delivery_method TEXT NOT NULL DEFAULT 'manual',
+                    deploy_status TEXT NOT NULL DEFAULT 'generated',
+                    config_payload_enc TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (host_id) REFERENCES hosts(id) ON DELETE SET NULL
+                );
+                """
+            )
+            await self.conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (7, ?)",
+                (now,),
+            )
+            await self.conn.commit()
+
     async def fetch_one(self, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
         cur = await self.conn.execute(sql, params)
         row = await cur.fetchone()

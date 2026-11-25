@@ -300,6 +300,25 @@ export interface SshDeployResponse {
   nut_port: number;
 }
 
+export interface HostTestRunResponse {
+  host_id: number;
+  host_name: string;
+  ip_or_host: string;
+  dry_run: boolean;
+  reachable: boolean;
+  check_method: string;
+  virtual_ups_name: string;
+  nut_client_connected: boolean;
+  current_battery_charge: number | null;
+  effective_wake_battery_pct: number;
+  would_wake_now: boolean;
+  wol_targets: string[];
+  shutdown_rule_summary: string;
+  disconnect_rule_summary: string;
+  started_live_wake: boolean;
+  notes: string[];
+}
+
 export interface ArpLookupResponse {
   ip_or_host: string;
   resolved_ip: string | null;
@@ -437,6 +456,9 @@ export interface NutClientConfigRequest {
   poll_freq: number;
   deadtime: number;
   shutdown_cmd: string;
+  host_id?: number | null;
+  device_name?: string;
+  save_record?: boolean;
 }
 
 export interface GeneratedConfigFile {
@@ -456,6 +478,30 @@ export interface NutClientConfigResponse {
   one_liner: string | null;
   gui_fields: GeneratedGuiField[];
   notes: string[];
+  record_id?: number | null;
+}
+
+export interface RecordedClientConfigSummary {
+  id: number;
+  host_id: number | null;
+  device_name: string;
+  platform: NutClientPlatform;
+  server_host: string;
+  nut_port: number;
+  ups_name: string;
+  username: string;
+  final_delay: number;
+  poll_freq: number;
+  deadtime: number;
+  shutdown_cmd: string;
+  delivery_method: "manual" | "ssh_deploy";
+  deploy_status: "generated" | "deployed" | "failed";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RecordedClientConfigDetail extends RecordedClientConfigSummary {
+  config: NutClientConfigResponse;
 }
 
 export interface AppVersionStatus {

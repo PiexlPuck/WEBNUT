@@ -19,6 +19,7 @@ import type {
   HostDisconnectPolicy,
   HostPayload,
   HostRecord,
+  HostTestRunResponse,
   NutClientPlatform,
   OrchestratorConfig,
   OrchestratorState,
@@ -97,7 +98,14 @@ export function HostsPage({
   const [savingHost, setSavingHost] = useState(false);
 
   const [simModalOpen, setSimModalOpen] = useState(false);
+  const [simMode, setSimMode] = useState<"single" | "bulk">("bulk");
+  const [simHostId, setSimHostId] = useState<number | "">("");
+  const [simBulkTarget, setSimBulkTarget] = useState<"eligible" | "selected">("eligible");
+  const [simBulkIds, setSimBulkIds] = useState<number[]>([]);
   const [simDryRun, setSimDryRun] = useState(true);
+  const [simRunning, setSimRunning] = useState(false);
+  const [simError, setSimError] = useState<string | null>(null);
+  const [hostTestResult, setHostTestResult] = useState<HostTestRunResponse | null>(null);
 
   // Quick One-Button SSH Deploy Modal
   const [deployHost, setDeployHost] = useState<HostRecord | null>(null);
@@ -269,6 +277,64 @@ export function HostsPage({
     await onRefresh();
   };
 
+  const openBulkTestModal = () => {
+    setSimMode("bulk");
+    setSimHostId(hosts[0]?.id ?? "");
+    setSimBulkTarget("eligible");
+    setSimBulkIds([]);
+    setSimDryRun(true);
+    setSimError(null);
+    setHostTestResult(null);
+    setSimModalOpen(true);
+  };
+
+  const openSingleTestModal = (h: HostRecord) => {
+    setSimMode("single");
+    setSimHostId(h.id);
+    setSimDryRun(true);
+    setSimError(null);
+    setHostTestResult(null);
+    setSimModalOpen(true);
+  };
+
+  const toggleBulkHostId = (id: number) => {
+    setSimBulkIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  };
+
+  const handleExecuteTestRun = async () => {
+    setSimRunning(true);
+    setSimError(null);
+    try {
+      if (simMode === "single") {
+        const hid = Number(simHostId);
+        if (!hid) {
+          setSimError("Select a host to run an individual test.");
+          return;
+        }
+        const res = await api.testRunHost(hid, simDryRun);
+        setHostTestResult(res);
+        await onRefresh();
+      } else {
+        if (simBulkTarget === "selected" && simBulkIds.length === 0) {
+          setSimError("Select at least one host for a selected bulk test run.");
+          return;
+        }
+        await api.simulateRecovery(
+          simDryRun,
+          "bulk",
+          simBulkTarget === "selected" ? simBulkIds : []
+        );
+        setSimModalOpen(false);
+      }
+    } catch (err) {
+      setSimError(err instanceof ApiError ? err.message : "Test run failed");
+    } finally {
+      setSimRunning(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
@@ -283,11 +349,11 @@ export function HostsPage({
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => setSimModalOpen(true)}
+            onClick={openBulkTestModal}
             className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-surface-800 hover:bg-surface-700 border border-slate-700 text-sm font-medium text-slate-200"
           >
             <FlaskConical className="h-4 w-4 text-amber-400" />
-            Simulate Recovery
+            Test Run
           </button>
           <button
             onClick={openAddModal}
@@ -497,6 +563,14 @@ export function HostsPage({
                       )}
                     </td>
                     <td className="px-4 py-3 text-right whitespace-nowrap space-x-1">
+                      <button
+                        onClick={() => openSingleTestModal(h)}
+                        title="Run Individual Host Test"
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 border border-slate-700 text-amber-300 text-xs"
+                      >
+                        <FlaskConical className="h-3 w-3" />
+                        Test
+                      </button>
                       <button
                         onClick={() => openSshDeployModal(h)}
                         title="One-Button SSH/SFTP Deploy"
@@ -951,18 +1025,123 @@ export function HostsPage({
         </div>
       </Modal>
 
-      {/* Simulate Recovery Modal */}
+      {/* Individual Host & Bulk Test Run Modal */}
       <Modal
         open={simModalOpen}
-        title="Simulate Power Recovery Sequence"
+        title="Test Run — Individual Host or Bulk Recovery"
         onClose={() => setSimModalOpen(false)}
-        maxWidth="max-w-md"
+        maxWidth="max-w-xl"
       >
         <div className="space-y-4">
-          <p className="text-sm text-slate-300">
-            Test your host boot priority and stagger configuration. In <strong>Dry-Run</strong>{" "}
-            mode, WebNUT evaluates eligible hosts without broadcasting real WoL magic packets.
-          </p>
+          <div className="grid grid-cols-2 gap-2 rounded-xl bg-surface-950 p-1 border border-slate-800">
+            <button
+              onClick={() => {
+                setSimMode("single");
+                setHostTestResult(null);
+                setSimError(null);
+                if (!simHostId && hosts[0]) setSimHostId(hosts[0].id);
+              }}
+              className={`py-2 rounded-lg text-xs font-medium transition-colors ${
+                simMode === "single"
+                  ? "bg-indigo-600 text-white"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              Individual Host Test
+            </button>
+            <button
+              onClick={() => {
+                setSimMode("bulk");
+                setHostTestResult(null);
+                setSimError(null);
+              }}
+              className={`py-2 rounded-lg text-xs font-medium transition-colors ${
+                simMode === "bulk"
+                  ? "bg-indigo-600 text-white"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              Bulk Recovery Test Run
+            </button>
+          </div>
+
+          {simMode === "single" ? (
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Select Host</label>
+                <select
+                  value={simHostId}
+                  onChange={(e) => {
+                    setSimHostId(e.target.value ? Number(e.target.value) : "");
+                    setHostTestResult(null);
+                  }}
+                  className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-sm text-white"
+                >
+                  <option value="">Choose a host...</option>
+                  {hosts.map((h) => (
+                    <option key={h.id} value={h.id}>
+                      {h.name} ({h.ip_or_host})
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <p className="text-xs text-slate-400">
+                Verifies live reachability, Repeater NUT stream connection, battery threshold,
+                shutdown &amp; disconnect rules. Uncheck Dry-Run to transmit a live WoL magic
+                packet to this host.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex flex-wrap gap-3 text-xs">
+                <label className="inline-flex items-center gap-2 text-slate-200 cursor-pointer">
+                  <input
+                    type="radio"
+                    checked={simBulkTarget === "eligible"}
+                    onChange={() => setSimBulkTarget("eligible")}
+                  />
+                  All Eligible Hosts (pre-outage online or Always Wake)
+                </label>
+                <label className="inline-flex items-center gap-2 text-slate-200 cursor-pointer">
+                  <input
+                    type="radio"
+                    checked={simBulkTarget === "selected"}
+                    onChange={() => setSimBulkTarget("selected")}
+                  />
+                  Pick Specific Hosts
+                </label>
+              </div>
+
+              {simBulkTarget === "selected" && (
+                <div className="rounded-xl border border-slate-800 bg-surface-950 divide-y divide-slate-800/70 max-h-48 overflow-y-auto">
+                  {hosts.map((h) => (
+                    <label
+                      key={h.id}
+                      className="px-3 py-2 flex items-center justify-between text-xs text-slate-200 cursor-pointer hover:bg-surface-900"
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={simBulkIds.includes(h.id)}
+                          onChange={() => toggleBulkHostId(h.id)}
+                          className="rounded border-slate-600 bg-surface-900 text-indigo-500"
+                        />
+                        <span className="font-medium text-white">{h.name}</span>
+                        <span className="font-mono text-slate-400">({h.ip_or_host})</span>
+                      </span>
+                      <span className="font-mono text-slate-500">#{h.boot_priority}</span>
+                    </label>
+                  ))}
+                  {hosts.length === 0 && (
+                    <div className="p-4 text-center text-xs text-slate-500">
+                      No managed hosts configured.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           <label className="flex items-center gap-2 text-sm text-slate-200 cursor-pointer">
             <input
               type="checkbox"
@@ -970,23 +1149,96 @@ export function HostsPage({
               onChange={(e) => setSimDryRun(e.target.checked)}
               className="rounded border-slate-600 bg-surface-950 text-indigo-500"
             />
-            Dry-Run Mode (do not send real UDP magic packets)
+            Dry-Run Mode (diagnostics only — do not send real UDP magic packets)
           </label>
+
+          {simError && (
+            <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+              {simError}
+            </div>
+          )}
+
+          {hostTestResult && simMode === "single" && (
+            <div className="rounded-xl border border-slate-700 bg-surface-950 p-4 space-y-2.5 text-xs">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                <span className="font-semibold text-white">
+                  {hostTestResult.host_name} ({hostTestResult.ip_or_host})
+                </span>
+                <span
+                  className={`px-2 py-0.5 rounded font-medium ${
+                    hostTestResult.started_live_wake
+                      ? "bg-amber-500/20 text-amber-300"
+                      : "bg-emerald-500/20 text-emerald-300"
+                  }`}
+                >
+                  {hostTestResult.started_live_wake ? "Live WoL Sent" : "Dry-Run Complete"}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <span className="text-slate-400">Host Reachability: </span>
+                  <strong className={hostTestResult.reachable ? "text-emerald-300" : "text-slate-300"}>
+                    {hostTestResult.reachable ? "Online" : "Offline"} ({hostTestResult.check_method})
+                  </strong>
+                </div>
+                <div>
+                  <span className="text-slate-400">NUT Repeater ({hostTestResult.virtual_ups_name}): </span>
+                  <strong
+                    className={
+                      hostTestResult.nut_client_connected ? "text-emerald-300" : "text-amber-300"
+                    }
+                  >
+                    {hostTestResult.nut_client_connected ? "Connected" : "Not Connected"}
+                  </strong>
+                </div>
+                <div>
+                  <span className="text-slate-400">Wake Threshold: </span>
+                  <strong className="text-white">
+                    &ge; {hostTestResult.effective_wake_battery_pct}% OL{" "}
+                    {hostTestResult.current_battery_charge !== null
+                      ? `(UPS: ${hostTestResult.current_battery_charge.toFixed(0)}%)`
+                      : ""}
+                  </strong>
+                </div>
+                <div>
+                  <span className="text-slate-400">WoL Targets: </span>
+                  <span className="font-mono text-slate-200">
+                    {hostTestResult.wol_targets.join(", ")}
+                  </span>
+                </div>
+              </div>
+              <div className="text-slate-300">
+                <span className="text-slate-400">Shutdown Rule:</span>{" "}
+                {hostTestResult.shutdown_rule_summary}
+              </div>
+              <div className="text-slate-300">
+                <span className="text-slate-400">Disconnect Grace:</span>{" "}
+                {hostTestResult.disconnect_rule_summary}
+              </div>
+            </div>
+          )}
+
           <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
             <button
               onClick={() => setSimModalOpen(false)}
               className="px-4 py-2 rounded-lg bg-surface-800 text-sm text-slate-300"
             >
-              Cancel
+              Close
             </button>
             <button
-              onClick={async () => {
-                await api.simulateRecovery(simDryRun);
-                setSimModalOpen(false);
-              }}
-              className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-sm font-medium text-white"
+              onClick={() => void handleExecuteTestRun()}
+              disabled={simRunning || (simMode === "single" && !simHostId)}
+              className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-sm font-medium text-white disabled:opacity-50"
             >
-              Start Simulation
+              {simRunning
+                ? "Running..."
+                : simMode === "single"
+                ? simDryRun
+                  ? "Run Host Dry-Run"
+                  : "Send Live Host WoL Test"
+                : simDryRun
+                ? "Start Bulk Dry-Run"
+                : "Start Live Bulk Test Run"}
             </button>
           </div>
         </div>

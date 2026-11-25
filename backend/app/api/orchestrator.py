@@ -48,6 +48,10 @@ async def simulate_recovery(
     request: Request,
 ) -> OrchestratorStateModel:
     try:
-        return await request.app.state.orchestrator.simulate_recovery(dry_run=payload.dry_run)
+        return await request.app.state.orchestrator.simulate_recovery(
+            dry_run=payload.dry_run,
+            scope=payload.scope,
+            host_ids=payload.host_ids,
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

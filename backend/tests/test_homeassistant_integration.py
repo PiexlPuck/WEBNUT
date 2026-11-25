@@ -227,6 +227,7 @@ async def test_homeassistant_auth_disable_and_package_zip(db, tmp_path: Path) ->
         with zipfile.ZipFile(io.BytesIO(pkg.content), "r") as zf:
             names = set(zf.namelist())
             for expected in (
+                "hacs.json",
                 "custom_components/webnut/manifest.json",
                 "custom_components/webnut/__init__.py",
                 "custom_components/webnut/api.py",

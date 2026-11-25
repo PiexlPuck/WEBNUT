@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import PlainTextResponse, Response
 
 from app.config import settings
 from app.database import utc_now_iso
@@ -21,16 +22,21 @@ from app.models.schemas import (
     IntegrationApiKeyResponse,
     IntegrationSettingsUpdateRequest,
     IntegrationSettingsView,
+    PrometheusConfigRequest,
+    PrometheusConfigResponse,
 )
 from app.nut.client_config import detect_local_lan_ip
 from app.services.integrations import (
     HOMEPAGE_FIELD_CATALOG,
+    build_grafana_dashboard_json,
     build_homeassistant_state,
     build_homepage_summary,
+    build_prometheus_metrics,
     generate_integration_api_key,
     get_integration_settings_row,
     mask_api_key_preview,
     render_homepage_yaml,
+    render_prometheus_scrape_yaml,
     verify_api_key,
 )
 
@@ -75,6 +81,7 @@ async def _build_settings_view(request: Request) -> IntegrationSettingsView:
         homepage_default_ups=str(row.get("homepage_default_ups") or ""),
         homepage_refresh_ms=int(row.get("homepage_refresh_ms") or 10000),
         homeassistant_enabled=bool(row.get("homeassistant_enabled", 1)),
+        prometheus_enabled=bool(row.get("prometheus_enabled", 1)),
         instance_id=str(row.get("instance_id") or ""),
         server_url=server_url,
         web_port=settings.web_port,
@@ -153,8 +160,9 @@ async def update_integration_settings(
         """
         INSERT INTO integration_settings (
             id, api_key_enabled, api_key_enc, homepage_enabled,
-            homepage_default_ups, homepage_refresh_ms, homeassistant_enabled, updated_at
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+            homepage_default_ups, homepage_refresh_ms, homeassistant_enabled,
+            prometheus_enabled, updated_at
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             api_key_enabled = excluded.api_key_enabled,
             api_key_enc = excluded.api_key_enc,
@@ -162,6 +170,7 @@ async def update_integration_settings(
             homepage_default_ups = excluded.homepage_default_ups,
             homepage_refresh_ms = excluded.homepage_refresh_ms,
             homeassistant_enabled = excluded.homeassistant_enabled,
+            prometheus_enabled = excluded.prometheus_enabled,
             updated_at = excluded.updated_at
         """,
         (
@@ -171,6 +180,7 @@ async def update_integration_settings(
             payload.homepage_default_ups.strip(),
             payload.homepage_refresh_ms,
             1 if payload.homeassistant_enabled else 0,
+            1 if payload.prometheus_enabled else 0,
             now,
         ),
     )
@@ -181,10 +191,11 @@ async def update_integration_settings(
             "integrations",
             "info",
             "integration_settings_updated",
-            "Updated Homepage, Home Assistant & external integration settings",
+            "Updated Homepage, Home Assistant & Grafana/Prometheus integration settings",
             {
                 "homepage_enabled": payload.homepage_enabled,
                 "homeassistant_enabled": payload.homeassistant_enabled,
+                "prometheus_enabled": payload.prometheus_enabled,
                 "api_key_enabled": payload.api_key_enabled,
                 "homepage_default_ups": payload.homepage_default_ups.strip(),
                 "homepage_refresh_ms": payload.homepage_refresh_ms,
@@ -490,6 +501,13 @@ async def download_homeassistant_package() -> Response:
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for hacs_candidate in (
+            comp_dir.parent / "hacs.json",
+            Path(__file__).resolve().parents[3] / "hacs.json",
+        ):
+            if hacs_candidate.is_file():
+                zf.write(hacs_candidate, "hacs.json")
+                break
         for path in sorted(comp_dir.rglob("*")):
             if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
                 continue
@@ -499,4 +517,78 @@ async def download_homeassistant_package() -> Response:
         content=buf.getvalue(),
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="webnut-homeassistant.zip"'},
+    )
+
+
+# --- Grafana & Prometheus ---
+
+_PROM_MEDIA_TYPE = "text/plain; version=0.0.4; charset=utf-8"
+_PROM_DISABLED_DETAIL = "Prometheus /metrics endpoint is disabled in WebNUT Integrations settings"
+
+
+@router.get("/prometheus/metrics", response_class=PlainTextResponse)
+async def get_prometheus_metrics(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> PlainTextResponse:
+    """Expose WebNUT UPS, orchestrator, and host metrics in Prometheus text format."""
+    row = await get_integration_settings_row(request.app.state.db)
+    if not bool(row.get("prometheus_enabled", 1)):
+        raise HTTPException(status_code=403, detail=_PROM_DISABLED_DETAIL)
+    _enforce_api_key(request, row, x_api_key, authorization)
+    state = await _compute_homeassistant_state(request, row)
+    return PlainTextResponse(content=build_prometheus_metrics(state), media_type=_PROM_MEDIA_TYPE)
+
+
+@router.get("/prometheus/preview", response_class=PlainTextResponse)
+async def preview_prometheus_metrics(request: Request) -> PlainTextResponse:
+    """Internal UI preview of /metrics output without requiring external API key headers."""
+    row = await get_integration_settings_row(request.app.state.db)
+    state = await _compute_homeassistant_state(request, row)
+    return PlainTextResponse(content=build_prometheus_metrics(state), media_type=_PROM_MEDIA_TYPE)
+
+
+@router.post("/prometheus/generate", response_model=PrometheusConfigResponse)
+async def generate_prometheus_config(
+    payload: PrometheusConfigRequest,
+    request: Request,
+) -> PrometheusConfigResponse:
+    """Generate a prometheus.yml scrape_configs block and live sample metrics."""
+    db = request.app.state.db
+    secret_box = request.app.state.secret_box
+    row = await get_integration_settings_row(db)
+    enc = str(row.get("api_key_enc") or "")
+    stored_key = secret_box.decrypt(enc) if enc else ""
+    api_key_enabled = bool(row.get("api_key_enabled")) and bool(stored_key)
+
+    default_target = f"{detect_local_lan_ip()}:{settings.web_port}"
+    try:
+        scrape_yaml, metrics_url, notes = render_prometheus_scrape_yaml(
+            payload,
+            default_target=default_target,
+            api_key_enabled=api_key_enabled,
+            api_key_value=stored_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    state = await _compute_homeassistant_state(request, row)
+    return PrometheusConfigResponse(
+        scrape_yaml=scrape_yaml,
+        metrics_url=metrics_url,
+        requires_api_key=api_key_enabled,
+        sample_metrics=build_prometheus_metrics(state),
+        notes=notes,
+    )
+
+
+@router.get("/grafana/dashboard.json")
+async def download_grafana_dashboard() -> Response:
+    """Download a pre-built Grafana dashboard JSON for WebNUT Prometheus metrics."""
+    payload = json.dumps(build_grafana_dashboard_json(), indent=2)
+    return Response(
+        content=payload,
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="webnut-grafana-dashboard.json"'},
     )

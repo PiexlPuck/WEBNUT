@@ -1203,17 +1203,23 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
                 </div>
 
                 <div className="rounded-xl bg-surface-950 border border-slate-800 p-4 space-y-2">
-                  <div className="text-xs font-semibold text-white">3-Step Installation</div>
+                  <div className="text-xs font-semibold text-white">Installation (Marketplace or Manual ZIP)</div>
                   <ol className="text-xs text-slate-300 space-y-1.5 list-decimal pl-4">
                     <li>
-                      Click <strong>Download Integration ZIP</strong> and extract{" "}
-                      <code className="text-indigo-300">custom_components/webnut</code> into your Home Assistant{" "}
-                      <code className="text-indigo-300">/config</code> directory.
+                      <strong>Marketplace (Recommended — HA 2026.11+):</strong> Open{" "}
+                      <strong>Settings → Marketplace</strong>, add{" "}
+                      <code className="text-indigo-300">https://github.com/PiexlPuck/WEBNUT</code> as a custom
+                      repository (metadata via <code className="text-indigo-300">hacs.json</code>), install{" "}
+                      <strong>WebNUT</strong>, and restart Home Assistant.
                     </li>
-                    <li>Restart Home Assistant so the custom component and local brand icons load.</li>
                     <li>
-                      In Home Assistant, open <strong>Settings → Devices &amp; Services → Add Integration</strong>, search{" "}
-                      <strong>WebNUT</strong>, and enter the host &amp; port above.
+                      <strong>Manual ZIP:</strong> Click <strong>Download Integration ZIP</strong>, extract{" "}
+                      <code className="text-indigo-300">custom_components/webnut</code> into your Home Assistant{" "}
+                      <code className="text-indigo-300">/config</code> directory, and restart Home Assistant.
+                    </li>
+                    <li>
+                      Open <strong>Settings → Devices &amp; Services → Add Integration → WebNUT</strong> and enter
+                      the host, port, and API key (if enabled) above.
                     </li>
                   </ol>
                 </div>

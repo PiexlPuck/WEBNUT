@@ -528,6 +528,7 @@ export interface IntegrationSettingsView {
   homepage_default_ups: string;
   homepage_refresh_ms: number;
   homeassistant_enabled: boolean;
+  prometheus_enabled: boolean;
   instance_id: string;
   server_url: string;
   web_port: number;
@@ -539,8 +540,8 @@ export interface IntegrationSettingsUpdatePayload {
   homepage_enabled: boolean;
   homepage_default_ups: string;
   homepage_refresh_ms: number;
-  homeassistant_enabled?: boolean;
   homeassistant_enabled: boolean;
+  prometheus_enabled: boolean;
 }
 
 export interface IntegrationApiKeyResponse {
@@ -670,6 +671,23 @@ export interface HomeAssistantState {
   ups: HomeAssistantUps[];
   hosts: HomeAssistantHost[];
   updated_at: string;
+}
+
+export interface PrometheusConfigRequest {
+  job_name: string;
+  target_host: string;
+  scheme: "http" | "https";
+  scrape_interval_sec: number;
+  metrics_path: "/metrics" | "/api/integrations/prometheus/metrics";
+  reveal_api_key: boolean;
+}
+
+export interface PrometheusConfigResponse {
+  scrape_yaml: string;
+  metrics_url: string;
+  requires_api_key: boolean;
+  sample_metrics: string;
+  notes: string[];
 }
 
 export type UpsCommandRisk = "safe" | "dangerous";

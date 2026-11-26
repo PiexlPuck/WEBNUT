@@ -87,6 +87,9 @@ export function HostsPage({
     disconnect_grace_sec: 600,
     repeater_enabled: true,
     repeater_port: 3493,
+    cold_start_boot_grace_sec: 30,
+    cold_start_resume_recovery: true,
+    cold_start_wake_always_wake: true,
   });
   const [savingPolicy, setSavingPolicy] = useState(false);
   const [feedback, setFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
@@ -487,26 +490,68 @@ export function HostsPage({
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-4 pt-2 border-t border-slate-800/70">
-          <label className="inline-flex items-center gap-2 text-sm text-slate-200 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={policy.auto_recovery_enabled}
-              onChange={(e) =>
-                setPolicy({ ...policy, auto_recovery_enabled: e.target.checked })
-              }
-              className="rounded border-slate-600 bg-surface-950 text-indigo-500"
-            />
-            Auto-Wake on OB &rarr; OL Recovery
-          </label>
-          <span className="text-xs text-slate-400">
-            Disconnect Policy:{" "}
-            <strong className="text-slate-200">
-              {policy.disconnect_policy === "keep_running"
-                ? "Keep Running & Alert"
-                : `Grace ${Math.round(policy.disconnect_grace_sec / 60)} min then Shutdown`}
-            </strong>
-          </span>
+        <div className="flex flex-wrap items-center justify-between gap-4 pt-3 border-t border-slate-800/70">
+          <div className="flex flex-wrap items-center gap-5">
+            <label className="inline-flex items-center gap-2 text-sm text-slate-200 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={policy.auto_recovery_enabled}
+                onChange={(e) =>
+                  setPolicy({ ...policy, auto_recovery_enabled: e.target.checked })
+                }
+                className="rounded border-slate-600 bg-surface-950 text-indigo-500"
+              />
+              Auto-Wake on OB &rarr; OL Recovery
+            </label>
+            <label className="inline-flex items-center gap-2 text-sm text-slate-200 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={policy.cold_start_resume_recovery}
+                onChange={(e) =>
+                  setPolicy({ ...policy, cold_start_resume_recovery: e.target.checked })
+                }
+                className="rounded border-slate-600 bg-surface-950 text-indigo-500"
+              />
+              Resume Interrupted Recovery on Boot
+            </label>
+            <label className="inline-flex items-center gap-2 text-sm text-slate-200 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={policy.cold_start_wake_always_wake}
+                onChange={(e) =>
+                  setPolicy({ ...policy, cold_start_wake_always_wake: e.target.checked })
+                }
+                className="rounded border-slate-600 bg-surface-950 text-indigo-500"
+              />
+              Wake Offline &ldquo;Always Wake&rdquo; Hosts on Cold Start
+            </label>
+          </div>
+          <div className="flex flex-wrap items-center gap-4">
+            <label className="inline-flex items-center gap-2 text-xs text-slate-400">
+              <span>Cold-Start Boot Grace (sec)</span>
+              <input
+                type="number"
+                min={0}
+                max={600}
+                value={policy.cold_start_boot_grace_sec}
+                onChange={(e) =>
+                  setPolicy({
+                    ...policy,
+                    cold_start_boot_grace_sec: Math.max(0, Number(e.target.value)),
+                  })
+                }
+                className="w-20 rounded-lg bg-surface-950 border border-slate-700 px-2.5 py-1 text-xs text-white"
+              />
+            </label>
+            <span className="text-xs text-slate-400">
+              Disconnect Policy:{" "}
+              <strong className="text-slate-200">
+                {policy.disconnect_policy === "keep_running"
+                  ? "Keep Running & Alert"
+                  : `Grace ${Math.round(policy.disconnect_grace_sec / 60)} min then Shutdown`}
+              </strong>
+            </span>
+          </div>
         </div>
       </div>
 

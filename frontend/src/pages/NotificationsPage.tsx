@@ -56,6 +56,14 @@ const EVENT_LABELS: Record<string, { label: string; desc: string }> = {
     label: "Repeater Node Online",
     desc: "Remote WEBNUT Repeater container connected and streaming telemetry",
   },
+  flow_drill_completed: {
+    label: "Flow Drill Completed",
+    desc: "One-off or scheduled end-to-end outage & WoL recovery drill finished",
+  },
+  flow_drill_failed: {
+    label: "Flow Drill Failed / Skipped",
+    desc: "End-to-end flow drill failed, aborted, or skipped pre-checks",
+  },
 };
 
 const PRIORITIES = [

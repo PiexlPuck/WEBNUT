@@ -23,10 +23,12 @@ class HostMonitor:
         db: Database,
         ws_hub: WebSocketHub | None = None,
         reachability_fn: ReachabilityFn = check_host_reachable,
+        boot_grace_check: Callable[[], bool] | None = None,
     ) -> None:
         self.db = db
         self.ws_hub = ws_hub
         self.reachability_fn = reachability_fn
+        self.boot_grace_check = boot_grace_check
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
 
@@ -34,6 +36,8 @@ class HostMonitor:
         """Poll all enabled hosts once and persist status + unfrozen pre-outage snapshot."""
         state_row = await self.db.fetch_one("SELECT snapshot_frozen FROM orchestrator_state WHERE id = 1")
         snapshot_frozen = bool(state_row["snapshot_frozen"]) if state_row else False
+        if self.boot_grace_check is not None and self.boot_grace_check():
+            snapshot_frozen = True
 
         hosts = await self.db.fetch_all(
             "SELECT id, ip_or_host, check_method, check_port FROM hosts WHERE enabled = 1"

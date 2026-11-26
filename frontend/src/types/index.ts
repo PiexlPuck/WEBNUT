@@ -343,6 +343,9 @@ export interface OrchestratorConfig {
   disconnect_grace_sec: number;
   repeater_enabled: boolean;
   repeater_port: number;
+  cold_start_boot_grace_sec: number;
+  cold_start_resume_recovery: boolean;
+  cold_start_wake_always_wake: boolean;
 }
 
 export interface OrchestratorState {
@@ -867,4 +870,115 @@ export interface RepeaterLinkStatus {
   latency_ms: number | null;
   ups_preview: RepeaterLocalUpsPreview[];
   updated_at: string | null;
+}
+
+export type FlowDrillMode = "dry_run" | "live";
+export type FlowDrillTargetScope = "selected" | "all";
+
+export interface FlowDrillStepEntry {
+  stage: string;
+  status: "running" | "passed" | "warning" | "failed" | "skipped" | "aborted" | string;
+  started_at: string;
+  completed_at: string | null;
+  message: string;
+}
+
+export interface FlowDrillHostResult {
+  host_id: number;
+  host_name: string;
+  ip_or_host: string;
+  shutdown_mode: string;
+  initial_online: boolean;
+  nut_client_connected: boolean;
+  ssh_configured: boolean;
+  shutdown_triggered: boolean;
+  shutdown_verified_offline: boolean;
+  shutdown_duration_sec: number | null;
+  wake_triggered: boolean;
+  wake_verified_online: boolean;
+  wake_attempts: number;
+  wake_duration_sec: number | null;
+  status: "passed" | "warning" | "failed" | "skipped" | "aborted" | string;
+  message: string;
+}
+
+export interface FlowDrillRunPayload {
+  mode: FlowDrillMode;
+  target_scope: FlowDrillTargetScope;
+  host_ids: number[];
+  min_battery_pct: number;
+  require_online: boolean;
+  shutdown_timeout_sec: number;
+  restore_delay_sec: number;
+  notify_on_complete: boolean;
+  notify_on_fail: boolean;
+  confirm_live: boolean;
+}
+
+export interface FlowDrillSchedulePayload {
+  name: string;
+  mode: FlowDrillMode;
+  target_scope: FlowDrillTargetScope;
+  host_ids: number[];
+  frequency: SelfTestFrequency;
+  day_of_week: number;
+  day_of_month: number;
+  time_hhmm: string;
+  min_battery_pct: number;
+  require_online: boolean;
+  shutdown_timeout_sec: number;
+  restore_delay_sec: number;
+  notify_on_complete: boolean;
+  notify_on_fail: boolean;
+  enabled: boolean;
+}
+
+export interface FlowDrillScheduleRecord extends FlowDrillSchedulePayload {
+  id: number;
+  last_run_at: string | null;
+  next_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FlowDrillReportRecord {
+  id: number;
+  schedule_id: number | null;
+  schedule_name: string;
+  mode: FlowDrillMode;
+  trigger_type: string;
+  status: "running" | "passed" | "warning" | "failed" | "skipped" | "aborted" | string;
+  current_stage: string;
+  ups_name: string;
+  ups_status_start: string;
+  battery_start: number | null;
+  battery_end: number | null;
+  hosts_total: number;
+  hosts_passed: number;
+  hosts_failed: number;
+  started_at: string;
+  completed_at: string | null;
+  duration_sec: number | null;
+  summary_message: string;
+  steps: FlowDrillStepEntry[];
+  host_results: FlowDrillHostResult[];
+}
+
+export interface FlowDrillReportsSummary {
+  total: number;
+  passed: number;
+  warning: number;
+  failed: number;
+  skipped: number;
+  aborted: number;
+  running: number;
+  pass_rate_pct: number | null;
+  avg_shutdown_sec: number | null;
+  avg_wake_sec: number | null;
+  last_passed_at: string | null;
+}
+
+export interface FlowDrillReportsResponse {
+  summary: FlowDrillReportsSummary;
+  reports: FlowDrillReportRecord[];
 }

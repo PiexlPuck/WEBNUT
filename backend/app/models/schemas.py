@@ -518,6 +518,9 @@ class OrchestratorConfigModel(BaseModel):
     disconnect_grace_sec: int = Field(default=600, ge=0, le=86400)
     repeater_enabled: bool = True
     repeater_port: int = Field(default=3493, ge=1, le=65535)
+    cold_start_boot_grace_sec: int = Field(default=30, ge=0, le=600)
+    cold_start_resume_recovery: bool = True
+    cold_start_wake_always_wake: bool = True
 
 
 class OrchestratorStateModel(BaseModel):
@@ -1059,3 +1062,126 @@ class RepeaterLinkStatusResponse(BaseModel):
     latency_ms: float | None = None
     ups_preview: list[RepeaterLocalUpsPreview] = Field(default_factory=list)
     updated_at: str | None = None
+
+
+# --- End-to-End Flow Drill Models ---
+
+FlowDrillMode = Literal["dry_run", "live"]
+FlowDrillTargetScope = Literal["selected", "all"]
+
+
+class FlowDrillStepEntry(BaseModel):
+    stage: str
+    status: Literal["running", "passed", "warning", "failed", "skipped", "aborted"] = "running"
+    started_at: str
+    completed_at: str | None = None
+    message: str = ""
+
+
+class FlowDrillHostResult(BaseModel):
+    host_id: int
+    host_name: str
+    ip_or_host: str
+    shutdown_mode: str = "nut_stream"
+    initial_online: bool = False
+    nut_client_connected: bool = False
+    ssh_configured: bool = False
+    shutdown_triggered: bool = False
+    shutdown_verified_offline: bool = False
+    shutdown_duration_sec: int | None = None
+    wake_triggered: bool = False
+    wake_verified_online: bool = False
+    wake_attempts: int = 0
+    wake_duration_sec: int | None = None
+    status: Literal["passed", "warning", "failed", "skipped", "aborted"] = "passed"
+    message: str = ""
+
+
+class FlowDrillRunRequest(BaseModel):
+    mode: FlowDrillMode = "dry_run"
+    target_scope: FlowDrillTargetScope = "all"
+    host_ids: list[int] = Field(default_factory=list)
+    min_battery_pct: float = Field(default=80.0, ge=0.0, le=100.0)
+    require_online: bool = True
+    shutdown_timeout_sec: int = Field(default=180, ge=10, le=1800)
+    restore_delay_sec: int = Field(default=15, ge=0, le=300)
+    notify_on_complete: bool = True
+    notify_on_fail: bool = True
+    confirm_live: bool = False
+
+
+class FlowDrillScheduleCreate(BaseModel):
+    name: str = Field(default="Weekly Flow Drill", min_length=1, max_length=100)
+    mode: FlowDrillMode = "dry_run"
+    target_scope: FlowDrillTargetScope = "all"
+    host_ids: list[int] = Field(default_factory=list)
+    frequency: SelfTestFrequency = "weekly"
+    day_of_week: int = Field(default=0, ge=0, le=6)
+    day_of_month: int = Field(default=1, ge=1, le=31)
+    time_hhmm: str = Field(default="04:00", pattern=r"^\d{2}:\d{2}$")
+    min_battery_pct: float = Field(default=80.0, ge=0.0, le=100.0)
+    require_online: bool = True
+    shutdown_timeout_sec: int = Field(default=180, ge=10, le=1800)
+    restore_delay_sec: int = Field(default=15, ge=0, le=300)
+    notify_on_complete: bool = True
+    notify_on_fail: bool = True
+    enabled: bool = True
+
+    @field_validator("time_hhmm")
+    @classmethod
+    def _validate_drill_time_hhmm(cls, value: str) -> str:
+        hh_str, mm_str = value.split(":", 1)
+        hh, mm = int(hh_str), int(mm_str)
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            raise ValueError("time_hhmm must be a valid 24-hour HH:MM time (00:00 - 23:59)")
+        return value
+
+
+class FlowDrillScheduleRecord(FlowDrillScheduleCreate):
+    id: int
+    last_run_at: str | None = None
+    next_run_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class FlowDrillReportRecord(BaseModel):
+    id: int
+    schedule_id: int | None = None
+    schedule_name: str = ""
+    mode: FlowDrillMode
+    trigger_type: str
+    status: str
+    current_stage: str = "precheck"
+    ups_name: str = ""
+    ups_status_start: str = ""
+    battery_start: float | None = None
+    battery_end: float | None = None
+    hosts_total: int = 0
+    hosts_passed: int = 0
+    hosts_failed: int = 0
+    started_at: str
+    completed_at: str | None = None
+    duration_sec: int | None = None
+    summary_message: str = ""
+    steps: list[FlowDrillStepEntry] = Field(default_factory=list)
+    host_results: list[FlowDrillHostResult] = Field(default_factory=list)
+
+
+class FlowDrillReportsSummary(BaseModel):
+    total: int = 0
+    passed: int = 0
+    warning: int = 0
+    failed: int = 0
+    skipped: int = 0
+    aborted: int = 0
+    running: int = 0
+    pass_rate_pct: float | None = None
+    avg_shutdown_sec: float | None = None
+    avg_wake_sec: float | None = None
+    last_passed_at: str | None = None
+
+
+class FlowDrillReportsResponse(BaseModel):
+    summary: FlowDrillReportsSummary
+    reports: list[FlowDrillReportRecord] = Field(default_factory=list)

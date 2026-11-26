@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
@@ -91,6 +92,11 @@ class RecoveryOrchestrator:
         self._ups_ob_started_at: dict[str, datetime] = {}
         self._host_shutdown_forced: dict[int, tuple[str, str]] = {}
         self._host_ssh_shutdown_sent: set[int] = set()
+        self._drill_host_overrides: dict[int, tuple[str, str]] = {}
+        self._started_mono: float = time.monotonic()
+        self._cold_start_boot_grace_sec: int = 0
+        self._cold_start_pending: bool = False
+        self._cold_start_checked: bool = False
         self._latest_telemetry: dict = {
             "connected": False,
             "error": "Initializing",
@@ -101,6 +107,26 @@ class RecoveryOrchestrator:
     @property
     def latest_telemetry(self) -> dict:
         return self._latest_telemetry
+
+    def is_cold_start_grace_active(self) -> bool:
+        return (
+            self._cold_start_boot_grace_sec > 0
+            and (time.monotonic() - self._started_mono) < float(self._cold_start_boot_grace_sec)
+        )
+
+    def set_drill_host_override(self, host_id: int, status: str, reason: str = "flow_drill") -> None:
+        self._drill_host_overrides[int(host_id)] = (status, reason)
+
+    def clear_drill_host_override(self, host_id: int) -> None:
+        self._drill_host_overrides.pop(int(host_id), None)
+
+    async def sync_repeater_now(self) -> None:
+        cfg = await self.get_config()
+        ups_list = list(self._latest_telemetry.get("ups_list") or [])
+        default_ups = cfg.monitored_ups or (
+            str(ups_list[0].get("name")) if ups_list and ups_list[0].get("name") else "ups1"
+        )
+        await self._sync_repeater(ups_list, default_ups)
 
     async def get_config(self) -> OrchestratorConfigModel:
         row = await self.db.fetch_one("SELECT * FROM orchestrator_config WHERE id = 1")
@@ -117,6 +143,9 @@ class RecoveryOrchestrator:
             disconnect_grace_sec=int(row.get("disconnect_grace_sec", 600)),
             repeater_enabled=bool(row.get("repeater_enabled", 1)),
             repeater_port=int(row.get("repeater_port", 3493)),
+            cold_start_boot_grace_sec=int(row.get("cold_start_boot_grace_sec", 30)),
+            cold_start_resume_recovery=bool(row.get("cold_start_resume_recovery", 1)),
+            cold_start_wake_always_wake=bool(row.get("cold_start_wake_always_wake", 1)),
         )
 
     async def update_config(self, cfg: OrchestratorConfigModel) -> OrchestratorConfigModel:
@@ -134,6 +163,9 @@ class RecoveryOrchestrator:
                 disconnect_grace_sec = ?,
                 repeater_enabled = ?,
                 repeater_port = ?,
+                cold_start_boot_grace_sec = ?,
+                cold_start_resume_recovery = ?,
+                cold_start_wake_always_wake = ?,
                 updated_at = ?
             WHERE id = 1
             """,
@@ -148,14 +180,19 @@ class RecoveryOrchestrator:
                 cfg.disconnect_grace_sec,
                 1 if cfg.repeater_enabled else 0,
                 cfg.repeater_port,
+                cfg.cold_start_boot_grace_sec,
+                1 if cfg.cold_start_resume_recovery else 0,
+                1 if cfg.cold_start_wake_always_wake else 0,
                 now,
             ),
         )
+        if self._cold_start_pending or self._cold_start_boot_grace_sec > 0:
+            self._cold_start_boot_grace_sec = int(cfg.cold_start_boot_grace_sec)
         await self.event_log.record(
             "orchestrator",
             "info",
             "orchestrator_config_updated",
-            "Updated recovery, disconnect grace, and repeater settings",
+            "Updated recovery, cold-start, disconnect grace, and repeater settings",
             cfg.model_dump(),
         )
         return await self.get_config()
@@ -211,7 +248,11 @@ class RecoveryOrchestrator:
             await self.ws_hub.broadcast("hosts", rows)
 
     async def reconcile_on_startup(self) -> None:
-        """Cleanly reconcile interrupted recovery states after container/host reboot."""
+        """Reconcile cold-start state after container/host reboot without losing outage snapshots."""
+        cfg = await self.get_config()
+        self._cold_start_boot_grace_sec = int(cfg.cold_start_boot_grace_sec)
+        self._cold_start_pending = True
+
         row = await self.db.fetch_one("SELECT * FROM orchestrator_state WHERE id = 1")
         if row is None:
             return
@@ -232,26 +273,49 @@ class RecoveryOrchestrator:
 
         if row["state"] in ("RECOVERING", "STABILIZING"):
             prev_state = row["state"]
-            await self.db.execute(
-                """
-                UPDATE orchestrator_state
-                SET state = 'NORMAL',
-                    stabilizing_started_at = NULL,
-                    recovery_started_at = NULL,
-                    snapshot_frozen = 0,
-                    is_dry_run = 0,
-                    updated_at = ?
-                WHERE id = 1
-                """,
-                (now,),
-            )
-            await self.event_log.record(
-                "orchestrator",
-                "warning",
-                "system_reboot_reconciled",
-                f"Reconciled interrupted '{prev_state}' state on startup to NORMAL",
-                {"previous_state": prev_state, "reset_hosts": len(interrupted_hosts)},
-            )
+            is_dry_run = bool(row.get("is_dry_run"))
+            if cfg.cold_start_resume_recovery and not is_dry_run:
+                await self.db.execute(
+                    """
+                    UPDATE orchestrator_state
+                    SET state = 'ON_BATTERY',
+                        stabilizing_started_at = NULL,
+                        recovery_started_at = NULL,
+                        snapshot_frozen = 1,
+                        is_dry_run = 0,
+                        updated_at = ?
+                    WHERE id = 1
+                    """,
+                    (now,),
+                )
+                await self.event_log.record(
+                    "orchestrator",
+                    "warning",
+                    "system_reboot_recovery_resumed",
+                    f"Interrupted '{prev_state}' moved to ON_BATTERY with frozen snapshot for automatic recovery resume",
+                    {"previous_state": prev_state, "reset_hosts": len(interrupted_hosts)},
+                )
+            else:
+                await self.db.execute(
+                    """
+                    UPDATE orchestrator_state
+                    SET state = 'NORMAL',
+                        stabilizing_started_at = NULL,
+                        recovery_started_at = NULL,
+                        snapshot_frozen = 0,
+                        is_dry_run = 0,
+                        updated_at = ?
+                    WHERE id = 1
+                    """,
+                    (now,),
+                )
+                await self.event_log.record(
+                    "orchestrator",
+                    "warning",
+                    "system_reboot_reconciled",
+                    f"Reconciled interrupted '{prev_state}' state on startup to NORMAL",
+                    {"previous_state": prev_state, "reset_hosts": len(interrupted_hosts)},
+                )
 
     async def _cancel_recovery_task(self) -> None:
         if self._recovery_task is not None and not self._recovery_task.done():
@@ -271,7 +335,7 @@ class RecoveryOrchestrator:
             hid = int(h["id"])
             vname = make_virtual_ups_name(h)
             upstream = str(h.get("nut_ups_name") or "").strip() or default_ups_name
-            forced = self._host_shutdown_forced.get(hid)
+            forced = self._drill_host_overrides.get(hid) or self._host_shutdown_forced.get(hid)
             virtuals.append(
                 VirtualUpsOverride(
                     virtual_name=vname,
@@ -812,6 +876,67 @@ class RecoveryOrchestrator:
                     )
                     await self._broadcast_state()
                 return
+
+            if (
+                current_state == "NORMAL"
+                and self._cold_start_pending
+                and not self._cold_start_checked
+                and not self.is_cold_start_grace_active()
+            ):
+                self._cold_start_checked = True
+                self._cold_start_pending = False
+                if cfg.auto_recovery_enabled and cfg.cold_start_wake_always_wake:
+                    always_hosts = await self.db.fetch_all(
+                        "SELECT * FROM hosts WHERE enabled = 1 AND always_wake = 1 ORDER BY boot_priority ASC, id ASC"
+                    )
+                    offline_ids: list[int] = []
+                    for ah in always_hosts:
+                        req_pct = (
+                            float(ah["wake_min_battery_charge"])
+                            if ah.get("wake_min_battery_charge") is not None
+                            else float(cfg.min_battery_charge)
+                        )
+                        if charge is not None and float(charge) < req_pct:
+                            continue
+                        alive = await self.reachability_fn(
+                            str(ah["ip_or_host"]),
+                            str(ah["check_method"]),
+                            ah["check_port"],
+                            2.0,
+                        )
+                        if not alive:
+                            offline_ids.append(int(ah["id"]))
+                    if offline_ids and (
+                        self._recovery_task is None or self._recovery_task.done()
+                    ):
+                        await self.db.execute(
+                            """
+                            UPDATE orchestrator_state
+                            SET state = 'RECOVERING',
+                                last_ups_status = ?,
+                                recovery_started_at = ?,
+                                snapshot_frozen = 1,
+                                is_dry_run = 0,
+                                updated_at = ?
+                            WHERE id = 1
+                            """,
+                            (status_str, now, now),
+                        )
+                        await self.event_log.record(
+                            "orchestrator",
+                            "info",
+                            "cold_start_always_wake_triggered",
+                            f"Cold-start check found {len(offline_ids)} offline always_wake host(s); starting WoL recovery",
+                            {"host_ids": offline_ids, "ups": ups_name, "battery_charge": charge},
+                        )
+                        await self._broadcast_state()
+                        self._recovery_task = asyncio.create_task(
+                            self.run_recovery_sequence(
+                                dry_run=False, target_host_ids=offline_ids
+                            ),
+                            name="cold-start-always-wake",
+                        )
+                        return
 
         await self._evaluate_host_policies_matrix(cfg, now_dt, ups_list, ups_name)
         await self.db.execute(

@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import type {
   AppVersionStatus,
   EventLogEntry,
+  FlowDrillReportRecord,
   HostRecord,
   NutServiceStatus,
   OrchestratorState,
@@ -61,6 +62,7 @@ export interface LiveState {
   services: NutServiceStatus[];
   repeaterNodes: RepeaterNodeView[];
   repeaterLink: RepeaterLinkStatus | null;
+  latestDrillUpdate: FlowDrillReportRecord | null;
   recentEvents: EventLogEntry[];
   versionStatus: AppVersionStatus | null;
   checkingUpdates: boolean;
@@ -98,6 +100,7 @@ export function useLiveTelemetry(): LiveState {
   const [services, setServices] = useState<NutServiceStatus[]>([]);
   const [repeaterNodes, setRepeaterNodes] = useState<RepeaterNodeView[]>([]);
   const [repeaterLink, setRepeaterLink] = useState<RepeaterLinkStatus | null>(null);
+  const [latestDrillUpdate, setLatestDrillUpdate] = useState<FlowDrillReportRecord | null>(null);
   const [recentEvents, setRecentEvents] = useState<EventLogEntry[]>([]);
   const [versionStatus, setVersionStatus] = useState<AppVersionStatus | null>(null);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
@@ -111,7 +114,7 @@ export function useLiveTelemetry(): LiveState {
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to reach WebNUT backend";
       setVersionStatus((prev) => ({
-        current_version: prev?.current_version ?? "2.3.0",
+        current_version: prev?.current_version ?? "2.4.0",
         latest_version: prev?.latest_version ?? null,
         update_available: prev?.update_available ?? false,
         release_url: prev?.release_url ?? null,
@@ -200,6 +203,8 @@ export function useLiveTelemetry(): LiveState {
             setRepeaterNodes(msg.data as RepeaterNodeView[]);
           } else if (msg.type === "repeater_link") {
             setRepeaterLink(msg.data as RepeaterLinkStatus);
+          } else if (msg.type === "drill_update") {
+            setLatestDrillUpdate(msg.data as FlowDrillReportRecord);
           } else if (msg.type === "event") {
             const item = msg.data as EventLogEntry;
             setRecentEvents((prev) => [item, ...prev.filter((e) => e.id !== item.id)].slice(0, 25));
@@ -242,6 +247,7 @@ export function useLiveTelemetry(): LiveState {
     services,
     repeaterNodes,
     repeaterLink,
+    latestDrillUpdate,
     recentEvents,
     versionStatus,
     checkingUpdates,

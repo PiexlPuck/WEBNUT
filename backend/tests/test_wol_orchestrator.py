@@ -271,7 +271,7 @@ async def test_retry_loop_exhaustion_marks_wake_failed(db, event_log) -> None:
 
 
 @pytest.mark.asyncio
-async def test_reboot_reconciliation_clears_interrupted_recovery(db, event_log) -> None:
+async def test_reboot_reconciliation_resumes_interrupted_recovery(db, event_log) -> None:
     host_id = await _insert_host(
         db,
         name="node-a",
@@ -284,7 +284,7 @@ async def test_reboot_reconciliation_clears_interrupted_recovery(db, event_log) 
         (host_id,),
     )
     await db.execute(
-        "UPDATE orchestrator_state SET state = 'RECOVERING', snapshot_frozen = 1, recovery_started_at = ? WHERE id = 1",
+        "UPDATE orchestrator_state SET state = 'RECOVERING', snapshot_frozen = 1, is_dry_run = 0, recovery_started_at = ? WHERE id = 1",
         (now,),
     )
 
@@ -292,8 +292,73 @@ async def test_reboot_reconciliation_clears_interrupted_recovery(db, event_log) 
     await orch.reconcile_on_startup()
 
     st = await orch.get_state()
-    assert st.state == "NORMAL"
-    assert st.snapshot_frozen is False
+    assert st.state == "ON_BATTERY"
+    assert st.snapshot_frozen is True
     host = await db.fetch_one("SELECT wake_state, wake_attempt FROM hosts WHERE id = ?", (host_id,))
     assert host["wake_state"] == "IDLE"
     assert host["wake_attempt"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reboot_reconciliation_clears_dry_run_and_protects_boot_grace(db, event_log) -> None:
+    host_id = await _insert_host(
+        db,
+        name="always-box",
+        ip="10.0.0.16",
+        mac="AA:11:22:33:44:66",
+        was_online=1,
+        always_wake=1,
+        boot_timeout=1,
+        max_retries=1,
+    )
+    now = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    await db.execute(
+        "UPDATE orchestrator_state SET state = 'RECOVERING', snapshot_frozen = 1, is_dry_run = 1, recovery_started_at = ? WHERE id = 1",
+        (now,),
+    )
+    await db.execute("UPDATE orchestrator_config SET cold_start_boot_grace_sec = 60, min_battery_charge = 25.0 WHERE id = 1")
+
+    sent: list[str] = []
+    online_ips: set[str] = set()
+
+    def fake_wol(mac: str, _bcast: str | None) -> list[str]:
+        sent.append(mac)
+        online_ips.add("10.0.0.16")
+        return ["255.255.255.255:9"]
+
+    async def fake_reach(ip: str, _m: str, _p: int | None, _t: float) -> bool:
+        return ip in online_ips
+
+    orch = RecoveryOrchestrator(
+        db,
+        NutTcpClient(),
+        NotificationDispatcher(db, event_log),
+        event_log,
+        reachability_fn=fake_reach,
+        wol_sender=fake_wol,
+        check_poll_step=0.01,
+    )
+    await orch.reconcile_on_startup()
+
+    # Dry-run resets to NORMAL and unfrozen, while boot grace still shields HostMonitor
+    st = await orch.get_state()
+    assert st.state == "NORMAL"
+    assert st.snapshot_frozen is False
+    assert orch.is_cold_start_grace_active() is True
+
+    monitor = HostMonitor(db, reachability_fn=fake_reach, boot_grace_check=orch.is_cold_start_grace_active)
+    await monitor.poll_once()
+    row = await db.fetch_one("SELECT is_online, was_online_before_outage FROM hosts WHERE id = ?", (host_id,))
+    assert row["is_online"] == 0
+    assert row["was_online_before_outage"] == 1
+
+    # Once boot grace expires and UPS reports healthy OL, offline always_wake host wakes automatically
+    orch._cold_start_boot_grace_sec = 0
+    await orch.evaluate_telemetry(_snapshot("OL", charge=100.0))
+    if orch._recovery_task is not None:
+        await orch._recovery_task
+
+    assert sent == ["AA:11:22:33:44:66"]
+    row_after = await db.fetch_one("SELECT is_online, wake_state FROM hosts WHERE id = ?", (host_id,))
+    assert row_after["is_online"] == 1
+    assert row_after["wake_state"] == "WAKE_SUCCEEDED"

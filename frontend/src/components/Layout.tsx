@@ -6,6 +6,7 @@ import {
   Check,
   Copy,
   FileText,
+  FlaskConical,
   FolderArchive,
   LayoutGrid,
   Link2,
@@ -33,6 +34,7 @@ export type NavTab =
   | "repeaters"
   | "repeater_link"
   | "hosts"
+  | "drills"
   | "clients"
   | "recorded_configs"
   | "integrations"
@@ -62,6 +64,7 @@ const MAIN_NAV_ITEMS: { id: NavTab; label: string; icon: typeof Activity }[] = [
   { id: "repeaters", label: "Repeaters", icon: Radio },
   { id: "control", label: "UPS Control", icon: Sliders },
   { id: "hosts", label: "Managed Hosts", icon: Server },
+  { id: "drills", label: "Flow Drills", icon: FlaskConical },
   { id: "clients", label: "Client Setup", icon: Link2 },
   { id: "recorded_configs", label: "Saved Configs", icon: FolderArchive },
   { id: "integrations", label: "Integrations", icon: LayoutGrid },
@@ -147,7 +150,7 @@ export function Layout({
               className="lg:hidden inline-flex items-center gap-1 px-2 py-0.5 rounded bg-surface-800 hover:bg-surface-700 border border-slate-700/80 text-[11px] text-slate-300 disabled:opacity-50"
             >
               <RefreshCw className={`h-3 w-3 ${checkingUpdates ? "animate-spin" : ""}`} />
-              <span>v{versionStatus?.current_version ?? "2.3.0"}</span>
+              <span>v{versionStatus?.current_version ?? "2.4.0"}</span>
             </button>
             <span
               title={wsConnected ? "Live WebSocket Connected" : "Reconnecting..."}
@@ -243,7 +246,7 @@ export function Layout({
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5">
                 <span className="text-slate-400 font-mono">
-                  v{versionStatus?.current_version ?? "2.3.0"}
+                  v{versionStatus?.current_version ?? "2.4.0"}
                 </span>
                 {versionStatus?.update_available && (
                   <span

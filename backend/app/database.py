@@ -24,6 +24,8 @@ DEFAULT_NOTIFICATION_RULES: list[tuple[str, int, int]] = [
     ("ups_selftest_failed", 1, 1),
     ("repeater_node_offline", 1, 1),
     ("repeater_node_online", 1, 0),
+    ("flow_drill_completed", 1, 0),
+    ("flow_drill_failed", 1, 1),
 ]
 
 
@@ -568,6 +570,96 @@ class Database:
                 )
             await self.conn.execute(
                 "INSERT INTO schema_migrations (version, applied_at) VALUES (12, ?)",
+                (now,),
+            )
+            await self.conn.commit()
+
+        if 13 not in applied:
+            now = utc_now_iso()
+            cols = {
+                r["name"]
+                for r in await self.fetch_all("PRAGMA table_info(orchestrator_config)")
+            }
+            if "cold_start_boot_grace_sec" not in cols:
+                await self.conn.execute(
+                    "ALTER TABLE orchestrator_config ADD COLUMN cold_start_boot_grace_sec INTEGER NOT NULL DEFAULT 30"
+                )
+            if "cold_start_resume_recovery" not in cols:
+                await self.conn.execute(
+                    "ALTER TABLE orchestrator_config ADD COLUMN cold_start_resume_recovery INTEGER NOT NULL DEFAULT 1"
+                )
+            if "cold_start_wake_always_wake" not in cols:
+                await self.conn.execute(
+                    "ALTER TABLE orchestrator_config ADD COLUMN cold_start_wake_always_wake INTEGER NOT NULL DEFAULT 1"
+                )
+
+            await self.conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS flow_drill_schedules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL DEFAULT 'Scheduled Flow Drill',
+                    mode TEXT NOT NULL DEFAULT 'dry_run',
+                    target_scope TEXT NOT NULL DEFAULT 'all',
+                    host_ids_json TEXT NOT NULL DEFAULT '[]',
+                    frequency TEXT NOT NULL DEFAULT 'weekly',
+                    day_of_week INTEGER NOT NULL DEFAULT 0,
+                    day_of_month INTEGER NOT NULL DEFAULT 1,
+                    time_hhmm TEXT NOT NULL DEFAULT '04:00',
+                    min_battery_pct REAL NOT NULL DEFAULT 80.0,
+                    require_online INTEGER NOT NULL DEFAULT 1,
+                    shutdown_timeout_sec INTEGER NOT NULL DEFAULT 180,
+                    restore_delay_sec INTEGER NOT NULL DEFAULT 15,
+                    notify_on_complete INTEGER NOT NULL DEFAULT 1,
+                    notify_on_fail INTEGER NOT NULL DEFAULT 1,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    last_run_at TEXT,
+                    next_run_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS flow_drill_reports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    schedule_id INTEGER,
+                    schedule_name TEXT NOT NULL DEFAULT '',
+                    mode TEXT NOT NULL DEFAULT 'dry_run',
+                    trigger_type TEXT NOT NULL DEFAULT 'manual',
+                    status TEXT NOT NULL DEFAULT 'running',
+                    current_stage TEXT NOT NULL DEFAULT 'precheck',
+                    ups_name TEXT NOT NULL DEFAULT '',
+                    ups_status_start TEXT NOT NULL DEFAULT '',
+                    battery_start REAL,
+                    battery_end REAL,
+                    hosts_total INTEGER NOT NULL DEFAULT 0,
+                    hosts_passed INTEGER NOT NULL DEFAULT 0,
+                    hosts_failed INTEGER NOT NULL DEFAULT 0,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    duration_sec INTEGER,
+                    summary_message TEXT NOT NULL DEFAULT '',
+                    steps_json TEXT NOT NULL DEFAULT '[]',
+                    host_results_json TEXT NOT NULL DEFAULT '[]',
+                    FOREIGN KEY (schedule_id) REFERENCES flow_drill_schedules(id) ON DELETE SET NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_flow_drill_reports_started_at
+                    ON flow_drill_reports(started_at DESC);
+                """
+            )
+            for event_type, enabled, priority in (
+                ("flow_drill_completed", 1, 0),
+                ("flow_drill_failed", 1, 1),
+            ):
+                await self.conn.execute(
+                    """
+                    INSERT OR IGNORE INTO notification_rules (
+                        event_type, enabled, priority, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (event_type, enabled, priority, now),
+                )
+            await self.conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (13, ?)",
                 (now,),
             )
             await self.conn.commit()

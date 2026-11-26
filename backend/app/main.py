@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.control import router as control_router
+from app.api.drills import router as drills_router
 from app.api.events import router as events_router
 from app.api.hosts import router as hosts_router
 from app.api.integrations import get_prometheus_metrics, router as integrations_router
@@ -28,6 +29,7 @@ from app.nut.parser import parse_nut_conf, parse_ups_conf, parse_upsd_conf, pars
 from app.nut.repeater import NutRepeaterServer
 from app.nut.supervisor import NutSupervisor
 from app.services.crypto import SecretBox
+from app.services.drill_scheduler import FlowDrillScheduler
 from app.services.event_log import EventLogService
 from app.services.repeater_agent import RepeaterAgent
 from app.services.repeater_hub import RepeaterHub
@@ -127,6 +129,7 @@ async def lifespan(app: FastAPI):
     app.state.host_monitor = None
     app.state.orchestrator = None
     app.state.selftest_scheduler = None
+    app.state.drill_scheduler = None
 
     if not is_external:
         try:
@@ -173,7 +176,6 @@ async def lifespan(app: FastAPI):
         ws_hub=ws_hub,
         heartbeat_timeout_sec=settings.webnut_repeater_heartbeat_timeout_sec,
     )
-    host_monitor = HostMonitor(db, ws_hub=ws_hub)
     orchestrator = RecoveryOrchestrator(
         db,
         nut_client,
@@ -183,6 +185,11 @@ async def lifespan(app: FastAPI):
         repeater=repeater,
         secret_box=secret_box,
         repeater_hub=repeater_hub,
+    )
+    host_monitor = HostMonitor(
+        db,
+        ws_hub=ws_hub,
+        boot_grace_check=orchestrator.is_cold_start_grace_active,
     )
     repeater_hub.set_on_telemetry_change(orchestrator.refresh_from_repeaters)
     selftest_scheduler = SelfTestScheduler(
@@ -195,12 +202,20 @@ async def lifespan(app: FastAPI):
         ws_hub=ws_hub,
         repeater_hub=repeater_hub,
     )
+    drill_scheduler = FlowDrillScheduler(
+        db,
+        orchestrator,
+        dispatcher,
+        event_log,
+        ws_hub=ws_hub,
+    )
 
     app.state.repeater = repeater
     app.state.repeater_hub = repeater_hub
     app.state.host_monitor = host_monitor
     app.state.orchestrator = orchestrator
     app.state.selftest_scheduler = selftest_scheduler
+    app.state.drill_scheduler = drill_scheduler
 
     await repeater_hub.start()
     await orchestrator.reconcile_on_startup()
@@ -211,6 +226,7 @@ async def lifespan(app: FastAPI):
     orchestrator.start()
     version_checker.start()
     selftest_scheduler.start()
+    drill_scheduler.start()
 
     await event_log.record(
         "system",
@@ -223,6 +239,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await drill_scheduler.stop()
         await selftest_scheduler.stop()
         await version_checker.stop()
         await orchestrator.stop()
@@ -246,6 +263,7 @@ app.include_router(events_router)
 app.include_router(system_router)
 app.include_router(integrations_router)
 app.include_router(control_router)
+app.include_router(drills_router)
 app.include_router(repeaters_router)
 
 

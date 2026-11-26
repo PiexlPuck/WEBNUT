@@ -3,6 +3,11 @@ import type {
   ArpLookupResponse,
   CreateSecondaryUserResponse,
   EventLogPage,
+  FlowDrillReportRecord,
+  FlowDrillReportsResponse,
+  FlowDrillRunPayload,
+  FlowDrillSchedulePayload,
+  FlowDrillScheduleRecord,
   HardwareScanResponse,
   HomeAssistantInfo,
   HomeAssistantState,
@@ -455,4 +460,47 @@ export const api = {
       method: "DELETE",
     });
   },
+
+  // End-to-End Flow Drills
+  runFlowDrill: (payload: FlowDrillRunPayload) =>
+    request<FlowDrillReportRecord>("/api/drills/run", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  abortFlowDrill: (reportId: number) =>
+    request<FlowDrillReportRecord>(`/api/drills/runs/${reportId}/abort`, {
+      method: "POST",
+    }),
+  getFlowDrillSchedules: () =>
+    request<FlowDrillScheduleRecord[]>("/api/drills/schedules"),
+  createFlowDrillSchedule: (payload: FlowDrillSchedulePayload) =>
+    request<FlowDrillScheduleRecord>("/api/drills/schedules", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateFlowDrillSchedule: (id: number, payload: FlowDrillSchedulePayload) =>
+    request<FlowDrillScheduleRecord>(`/api/drills/schedules/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+  deleteFlowDrillSchedule: (id: number) =>
+    request<{ deleted: boolean; id: number }>(`/api/drills/schedules/${id}`, {
+      method: "DELETE",
+    }),
+  runFlowDrillScheduleNow: (id: number) =>
+    request<FlowDrillReportRecord>(`/api/drills/schedules/${id}/run-now`, {
+      method: "POST",
+    }),
+  getFlowDrillReports: (limit = 100) =>
+    request<FlowDrillReportsResponse>(`/api/drills/reports?limit=${limit}`),
+  getFlowDrillReport: (reportId: number) =>
+    request<FlowDrillReportRecord>(`/api/drills/reports/${reportId}`),
+  deleteFlowDrillReport: (reportId: number) =>
+    request<{ deleted: boolean; id: number }>(`/api/drills/reports/${reportId}`, {
+      method: "DELETE",
+    }),
+  clearFlowDrillReports: () =>
+    request<{ cleared: number }>("/api/drills/reports", {
+      method: "DELETE",
+    }),
 };

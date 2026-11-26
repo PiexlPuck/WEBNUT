@@ -3,6 +3,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Layout, type NavTab } from "./components/Layout";
 import { useLiveTelemetry } from "./hooks/useLiveTelemetry";
 import { DashboardPage } from "./pages/DashboardPage";
+import { DrillsPage } from "./pages/DrillsPage";
 import { EventsPage } from "./pages/EventsPage";
 import { HostsPage } from "./pages/HostsPage";
 import { IntegrationsPage } from "./pages/IntegrationsPage";
@@ -94,6 +95,14 @@ export function App() {
             telemetry={live.telemetry}
             onRefresh={live.refreshAll}
             onOpenNutClientSetup={openNutClientSetup}
+          />
+        )}
+        {effectiveTab === "drills" && (
+          <DrillsPage
+            hosts={live.hosts}
+            telemetry={live.telemetry}
+            latestDrillUpdate={live.latestDrillUpdate}
+            onRefresh={live.refreshAll}
           />
         )}
         {effectiveTab === "clients" && (

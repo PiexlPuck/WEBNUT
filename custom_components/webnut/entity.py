@@ -14,7 +14,7 @@ from .coordinator import WebNutCoordinator
 def server_device_info(coordinator: WebNutCoordinator) -> DeviceInfo:
     return DeviceInfo(
         identifiers={(DOMAIN, coordinator.instance_id)},
-        name="WebNUT",
+        name=coordinator.instance_name or "WebNUT",
         manufacturer=MANUFACTURER,
         model="UPS & Power Orchestrator",
         sw_version=coordinator.server_version,

@@ -33,6 +33,7 @@ from app.services.integrations import (
     build_homepage_summary,
     build_prometheus_metrics,
     generate_integration_api_key,
+    get_instance_name,
     get_integration_settings_row,
     mask_api_key_preview,
     render_homepage_yaml,
@@ -70,6 +71,7 @@ async def _build_settings_view(request: Request) -> IntegrationSettingsView:
     db = request.app.state.db
     secret_box = request.app.state.secret_box
     row = await get_integration_settings_row(db)
+    instance_name = await get_instance_name(db)
     enc = str(row.get("api_key_enc") or "")
     plaintext = secret_box.decrypt(enc) if enc else ""
     server_url = f"http://{detect_local_lan_ip()}:{settings.web_port}"
@@ -83,6 +85,7 @@ async def _build_settings_view(request: Request) -> IntegrationSettingsView:
         homeassistant_enabled=bool(row.get("homeassistant_enabled", 1)),
         prometheus_enabled=bool(row.get("prometheus_enabled", 1)),
         instance_id=str(row.get("instance_id") or ""),
+        instance_name=instance_name,
         server_url=server_url,
         web_port=settings.web_port,
         ups_names=_collect_ups_names(request),
@@ -97,6 +100,7 @@ async def _compute_summary(request: Request, ups: str, default_ups: str) -> Home
     orch_state = await orchestrator.get_state()
     orch_cfg = await orchestrator.get_config()
     hosts = await db.fetch_all("SELECT * FROM hosts ORDER BY boot_priority ASC, id ASC")
+    instance_name = await get_instance_name(db)
     repeater_status = repeater.get_status() if repeater is not None else None
     return build_homepage_summary(
         telemetry=orchestrator.latest_telemetry,
@@ -106,6 +110,7 @@ async def _compute_summary(request: Request, ups: str, default_ups: str) -> Home
         repeater_status=repeater_status,
         requested_ups=ups,
         default_ups=default_ups,
+        instance_name=instance_name,
     )
 
 
@@ -406,6 +411,7 @@ async def _compute_homeassistant_state(request: Request, row: dict) -> HomeAssis
     db = request.app.state.db
     repeater = getattr(request.app.state, "repeater", None)
     version, latest, update_available = await _version_info(request)
+    instance_name = await get_instance_name(db)
     return build_homeassistant_state(
         instance_id=str(row.get("instance_id") or ""),
         version=version,
@@ -416,6 +422,7 @@ async def _compute_homeassistant_state(request: Request, row: dict) -> HomeAssis
         orch_cfg=await orchestrator.get_config(),
         hosts=await db.fetch_all("SELECT * FROM hosts ORDER BY boot_priority ASC, id ASC"),
         repeater_status=repeater.get_status() if repeater is not None else None,
+        instance_name=instance_name,
     )
 
 
@@ -428,15 +435,7 @@ async def get_homeassistant_info(
     """Used by the Home Assistant config flow to validate connectivity, API key, and unique ID."""
     row = await _require_homeassistant(request, x_api_key, authorization)
     version, _, _ = await _version_info(request)
-    instance_name = "WebNUT"
-    try:
-        ob_row = await request.app.state.db.fetch_one(
-            "SELECT instance_name FROM onboarding_state WHERE id = 1"
-        )
-        if ob_row and str(ob_row.get("instance_name") or "").strip():
-            instance_name = str(ob_row["instance_name"]).strip()
-    except Exception:
-        pass
+    instance_name = await get_instance_name(request.app.state.db)
     return HomeAssistantInfoResponse(
         instance_id=str(row.get("instance_id") or ""),
         name=instance_name,
@@ -594,9 +593,10 @@ async def generate_prometheus_config(
 
 
 @router.get("/grafana/dashboard.json")
-async def download_grafana_dashboard() -> Response:
+async def download_grafana_dashboard(request: Request) -> Response:
     """Download a pre-built Grafana dashboard JSON for WebNUT Prometheus metrics."""
-    payload = json.dumps(build_grafana_dashboard_json(), indent=2)
+    instance_name = await get_instance_name(request.app.state.db)
+    payload = json.dumps(build_grafana_dashboard_json(instance_name=instance_name), indent=2)
     return Response(
         content=payload,
         media_type="application/json",

@@ -173,6 +173,7 @@ async def test_migration_v8_defaults_and_summary_payload(db, tmp_path: Path) -> 
         res = await client.get("/api/integrations/homepage/summary")
         assert res.status_code == 200
         data = res.json()
+        assert data["instance_name"] == "WebNUT"
         assert data["connected"] is True
         assert data["ups_name"] == "apc_main"
         assert data["ups_model"] == "APC Smart-UPS 1500"
@@ -226,6 +227,22 @@ async def test_migration_v8_defaults_and_summary_payload(db, tmp_path: Path) -> 
         assert upd.status_code == 200
         disabled_res = await client.get("/api/integrations/homepage/summary")
         assert disabled_res.status_code == 403
+
+        # Re-enable and verify custom instance_name flows through settings and summary
+        await client.put(
+            "/api/integrations/settings",
+            json={
+                "api_key_enabled": False,
+                "homepage_enabled": True,
+                "homepage_default_ups": "",
+                "homepage_refresh_ms": 10000,
+            },
+        )
+        await db.execute("UPDATE onboarding_state SET instance_name = 'Rack Monitor' WHERE id = 1")
+        cfg_view = (await client.get("/api/integrations/settings")).json()
+        assert cfg_view["instance_name"] == "Rack Monitor"
+        summary_view = (await client.get("/api/integrations/homepage/summary")).json()
+        assert summary_view["instance_name"] == "Rack Monitor"
 
 
 @pytest.mark.asyncio

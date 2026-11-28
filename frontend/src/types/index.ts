@@ -538,6 +538,7 @@ export interface IntegrationSettingsView {
   homeassistant_enabled: boolean;
   prometheus_enabled: boolean;
   instance_id: string;
+  instance_name: string;
   server_url: string;
   web_port: number;
   ups_names: string[];
@@ -559,6 +560,7 @@ export interface IntegrationApiKeyResponse {
 }
 
 export interface HomepageSummary {
+  instance_name: string;
   connected: boolean;
   ups_name: string;
   ups_model: string;
@@ -666,6 +668,7 @@ export interface HomeAssistantOrchestrator {
 
 export interface HomeAssistantState {
   instance_id: string;
+  instance_name: string;
   version: string;
   latest_version: string | null;
   update_available: boolean;

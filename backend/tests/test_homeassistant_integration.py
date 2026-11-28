@@ -144,6 +144,7 @@ async def test_migration_v9_and_homeassistant_info_and_state(db, tmp_path: Path)
         assert info_res.status_code == 200
         info = info_res.json()
         assert info["instance_id"] == row["instance_id"]
+        assert info["name"] == "WebNUT"
         assert info["version"] == "2.2.0"
         assert info["api_key_required"] is False
         assert info["homeassistant_enabled"] is True
@@ -151,6 +152,7 @@ async def test_migration_v9_and_homeassistant_info_and_state(db, tmp_path: Path)
         state_res = await client.get("/api/integrations/homeassistant/state")
         assert state_res.status_code == 200
         state = state_res.json()
+        assert state["instance_name"] == "WebNUT"
         assert state["connected"] is True
         assert state["version"] == "2.2.0"
         assert state["latest_version"] == "2.2.1"
@@ -181,6 +183,13 @@ async def test_migration_v9_and_homeassistant_info_and_state(db, tmp_path: Path)
 
         wake_missing = await client.post("/api/integrations/homeassistant/hosts/999/wake")
         assert wake_missing.status_code == 404
+
+        # Custom instance name propagates to both /info and /state for HA live sync
+        await db.execute("UPDATE onboarding_state SET instance_name = 'Garage Rack' WHERE id = 1")
+        renamed_info = (await client.get("/api/integrations/homeassistant/info")).json()
+        renamed_state = (await client.get("/api/integrations/homeassistant/state")).json()
+        assert renamed_info["name"] == "Garage Rack"
+        assert renamed_state["instance_name"] == "Garage Rack"
 
 
 @pytest.mark.asyncio

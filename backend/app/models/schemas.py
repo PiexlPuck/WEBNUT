@@ -660,6 +660,7 @@ class IntegrationSettingsView(BaseModel):
     homeassistant_enabled: bool = True
     prometheus_enabled: bool = True
     instance_id: str = ""
+    instance_name: str = "WebNUT"
     server_url: str
     web_port: int = 8765
     ups_names: list[str] = Field(default_factory=list)
@@ -681,6 +682,7 @@ class IntegrationApiKeyResponse(BaseModel):
 
 
 class HomepageSummaryResponse(BaseModel):
+    instance_name: str = "WebNUT"
     connected: bool
     ups_name: str
     ups_model: str
@@ -924,6 +926,7 @@ class HomeAssistantOrchestrator(BaseModel):
 
 class HomeAssistantStateResponse(BaseModel):
     instance_id: str
+    instance_name: str = "WebNUT"
     version: str
     latest_version: str | None = None
     update_available: bool = False

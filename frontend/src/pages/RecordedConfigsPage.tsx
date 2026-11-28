@@ -12,6 +12,7 @@ import {
   Upload,
 } from "lucide-react";
 import { api, ApiError } from "../api/client";
+import { copyToClipboard } from "../utils/clipboard";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Modal } from "../components/Modal";
 import type {
@@ -120,9 +121,11 @@ export function RecordedConfigsPage({
   };
 
   const copyText = async (key: string, text: string) => {
-    await navigator.clipboard.writeText(text);
-    setCopiedKey(key);
-    window.setTimeout(() => setCopiedKey(null), 2000);
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      setCopiedKey(key);
+      window.setTimeout(() => setCopiedKey(null), 2000);
+    }
   };
 
   return (

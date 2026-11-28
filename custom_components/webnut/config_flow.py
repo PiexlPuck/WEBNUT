@@ -95,8 +95,9 @@ class WebNutConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_API_KEY: user_input.get(CONF_API_KEY, ""),
                     }
                 )
+                instance_name = str(info.get("name") or "WebNUT").strip() or "WebNUT"
                 return self.async_create_entry(
-                    title=f"WebNUT ({user_input[CONF_HOST]})",
+                    title=f"{instance_name} ({user_input[CONF_HOST]})",
                     data=user_input,
                 )
 

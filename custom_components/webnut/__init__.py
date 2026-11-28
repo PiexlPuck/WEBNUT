@@ -37,4 +37,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: WebNutConfigEntry) -> b
 
 
 async def _async_reload_on_options(hass: HomeAssistant, entry: WebNutConfigEntry) -> None:
+    coordinator = getattr(entry, "runtime_data", None)
+    if (
+        coordinator is not None
+        and dict(entry.options) == coordinator.applied_options
+        and dict(entry.data) == coordinator.applied_data
+    ):
+        return
     await hass.config_entries.async_reload(entry.entry_id)

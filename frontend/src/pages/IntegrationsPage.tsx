@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   BatteryCharging,
@@ -21,6 +21,7 @@ import {
   Zap,
 } from "lucide-react";
 import { api, ApiError } from "../api/client";
+import { copyToClipboard } from "../utils/clipboard";
 import type {
   HomeAssistantState,
   HomepageConfigRequest,
@@ -38,6 +39,7 @@ import type {
 } from "../types";
 
 interface IntegrationsPageProps {
+  instanceName: string;
   telemetry: TelemetrySnapshot;
   hosts: HostRecord[];
   orchestrator: OrchestratorState;
@@ -181,7 +183,7 @@ function ApiKeyBar({
   );
 }
 
-export function IntegrationsPage({ telemetry, hosts, orchestrator }: IntegrationsPageProps) {
+export function IntegrationsPage({ instanceName, telemetry, hosts, orchestrator }: IntegrationsPageProps) {
   const [activeIntegration, setActiveIntegration] = useState<IntegrationTab>("homepage");
   const [settings, setSettings] = useState<IntegrationSettingsView | null>(null);
   const [fields, setFields] = useState<HomepageFieldOption[]>([]);
@@ -211,9 +213,11 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
   const [promTestResult, setPromTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [feedback, setFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
 
+  const lastAutoServiceName = useRef(instanceName || "WebNUT");
+
   // Generator form state
   const [form, setForm] = useState<HomepageConfigRequest>({
-    service_name: "WebNUT",
+    service_name: instanceName || "WebNUT",
     description: "UPS & Power Orchestrator",
     icon: "mdi-battery-charging",
     base_url: typeof window !== "undefined" ? window.location.origin : "http://127.0.0.1:8765",
@@ -342,10 +346,21 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
   }, [form, refreshPreviewAndYaml, telemetry.updated_at, hosts.length, orchestrator.state]);
 
   useEffect(() => {
+    const clean = instanceName || "WebNUT";
+    setForm((prev) => {
+      if (prev.service_name === lastAutoServiceName.current || !prev.service_name.trim()) {
+        return { ...prev, service_name: clean };
+      }
+      return prev;
+    });
+    lastAutoServiceName.current = clean;
+  }, [instanceName]);
+
+  useEffect(() => {
     if (activeIntegration === "homeassistant") {
       void refreshHaPreview();
     }
-  }, [activeIntegration, refreshHaPreview, telemetry.updated_at, hosts.length, orchestrator.state]);
+  }, [activeIntegration, refreshHaPreview, telemetry.updated_at, hosts.length, orchestrator.state, instanceName]);
 
   useEffect(() => {
     if (activeIntegration !== "grafana") return;
@@ -353,12 +368,14 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
       void refreshPromPreview(promForm);
     }, 150);
     return () => window.clearTimeout(timer);
-  }, [activeIntegration, promForm, refreshPromPreview, telemetry.updated_at, hosts.length, orchestrator.state]);
+  }, [activeIntegration, promForm, refreshPromPreview, telemetry.updated_at, hosts.length, orchestrator.state, instanceName]);
 
   const copyText = async (id: string, text: string) => {
-    await navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    window.setTimeout(() => setCopiedId((cur) => (cur === id ? null : cur)), 2000);
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      setCopiedId(id);
+      window.setTimeout(() => setCopiedId((cur) => (cur === id ? null : cur)), 2000);
+    }
   };
 
   const resolveApiKeyIfEnabled = async (): Promise<string> => {
@@ -515,7 +532,7 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
       const ms = Math.round(performance.now() - started);
       setHaTestResult({
         ok: true,
-        msg: `HTTP 200 OK (${ms} ms) — WebNUT v${res.version}, Instance ${res.instance_id}, API Key ${res.api_key_required ? "Required" : "Optional"}`,
+        msg: `HTTP 200 OK (${ms} ms) — ${res.name || instanceName || "WebNUT"} v${res.version}, Instance ${res.instance_id}, API Key ${res.api_key_required ? "Required" : "Optional"}`,
       });
     } catch (err) {
       const ms = Math.round(performance.now() - started);
@@ -889,7 +906,7 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
                     </div>
                     <div className="min-w-0">
                       <div className="text-sm font-semibold text-white truncate">
-                        {form.service_name || "WebNUT"}
+                        {form.service_name || instanceName || "WebNUT"}
                       </div>
                       {form.description && (
                         <div className="text-xs text-slate-400 truncate">{form.description}</div>
@@ -1279,6 +1296,7 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
 
                 <div className="space-y-2.5">
                   {[
+                    { id: "ha_name", label: "Instance Name", value: settings?.instance_name || instanceName || "WebNUT" },
                     { id: "ha_host", label: "Host / IP Address", value: haHostAddress },
                     { id: "ha_port", label: "Web UI / API Port", value: String(settings?.web_port ?? 8765) },
                     { id: "ha_instance", label: "Instance ID", value: settings?.instance_id || "—" },
@@ -1314,6 +1332,9 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
                       </div>
                     </div>
                   </div>
+                  <p className="text-[11px] text-slate-400 px-1">
+                    Home Assistant automatically syncs this Instance Name to its server hub device &amp; integration title on poll.
+                  </p>
                 </div>
 
                 <div className="rounded-xl bg-surface-950 border border-slate-800 p-4 space-y-2">
@@ -1367,7 +1388,7 @@ export function IntegrationsPage({ telemetry, hosts, orchestrator }: Integration
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2 text-sm font-semibold text-white">
                         <Activity className="h-4 w-4 text-indigo-400" />
-                        WebNUT Hub
+                        {haPreview.instance_name || instanceName || "WebNUT"} Hub
                       </div>
                       <span className="text-[11px] font-mono text-slate-400">v{haPreview.version}</span>
                     </div>

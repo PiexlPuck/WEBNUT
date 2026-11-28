@@ -165,6 +165,7 @@ export function App() {
         )}
         {effectiveTab === "integrations" && (
           <IntegrationsPage
+            instanceName={instanceName}
             telemetry={live.telemetry}
             hosts={live.hosts}
             orchestrator={live.orchestrator}

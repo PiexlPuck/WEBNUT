@@ -15,6 +15,7 @@ import {
   WifiOff,
 } from "lucide-react";
 import { api, ApiError } from "../api/client";
+import { copyToClipboard } from "../utils/clipboard";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Modal } from "../components/Modal";
 import type {
@@ -88,9 +89,11 @@ export function RepeatersPage({ nodes, telemetry, onRefresh }: RepeatersPageProp
   }, [loadTokens]);
 
   const copyText = async (key: string, text: string) => {
-    await navigator.clipboard.writeText(text);
-    setCopiedField(key);
-    window.setTimeout(() => setCopiedField(null), 2000);
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      setCopiedField(key);
+      window.setTimeout(() => setCopiedField(null), 2000);
+    }
   };
 
   const handleOpenAddModal = () => {

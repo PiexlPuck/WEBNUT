@@ -110,6 +110,12 @@ HOMEPAGE_FIELD_CATALOG: dict[str, HomepageFieldOption] = {
         format="text",
         description="Detected UPS manufacturer/model string",
     ),
+    "instance_name": HomepageFieldOption(
+        field="instance_name",
+        label="Instance",
+        format="text",
+        description="Custom WebNUT instance display name",
+    ),
 }
 
 HOMEPAGE_PRESETS: dict[str, list[str]] = {
@@ -157,6 +163,19 @@ def verify_api_key(provided: str | None, stored_plaintext: str) -> bool:
     if not provided or not stored_plaintext:
         return False
     return hmac.compare_digest(provided.strip(), stored_plaintext.strip())
+
+
+async def get_instance_name(db: Database) -> str:
+    """Return the configured WebNUT instance display name, defaulting to 'WebNUT'."""
+    try:
+        row = await db.fetch_one("SELECT instance_name FROM onboarding_state WHERE id = 1")
+        if row:
+            cleaned = str(row.get("instance_name") or "").strip()
+            if cleaned:
+                return cleaned
+    except Exception:
+        pass
+    return "WebNUT"
 
 
 async def get_integration_settings_row(db: Database) -> dict:
@@ -241,8 +260,10 @@ def build_homepage_summary(
     repeater_status: dict | None = None,
     requested_ups: str = "",
     default_ups: str = "",
+    instance_name: str = "WebNUT",
 ) -> HomepageSummaryResponse:
     """Build a flat, Homepage customapi-friendly summary payload."""
+    clean_instance_name = (instance_name or "").strip() or "WebNUT"
     ups_list = list(telemetry.get("ups_list") or [])
     telemetry_connected = bool(telemetry.get("connected"))
     updated_at = str(telemetry.get("updated_at") or utc_now_iso())
@@ -270,6 +291,7 @@ def build_homepage_summary(
         target_ups = ups_by_name.get(req_name)
         if target_ups is None:
             return HomepageSummaryResponse(
+                instance_name=clean_instance_name,
                 connected=False,
                 ups_name=req_name,
                 ups_model="",
@@ -298,6 +320,7 @@ def build_homepage_summary(
 
     if not telemetry_connected or target_ups is None:
         return HomepageSummaryResponse(
+            instance_name=clean_instance_name,
             connected=False,
             ups_name=req_name or def_name or mon_name,
             ups_model="",
@@ -337,6 +360,7 @@ def build_homepage_summary(
         ups_model = model or mfr or str(target_ups.get("description") or "")
 
     return HomepageSummaryResponse(
+        instance_name=clean_instance_name,
         connected=True,
         ups_name=str(target_ups.get("name") or ""),
         ups_model=ups_model,
@@ -485,8 +509,10 @@ def build_homeassistant_state(
     orch_cfg: OrchestratorConfigModel,
     hosts: list[dict],
     repeater_status: dict | None = None,
+    instance_name: str = "WebNUT",
 ) -> HomeAssistantStateResponse:
     """Build the full Home Assistant coordinator payload (all UPS units + managed hosts)."""
+    clean_instance_name = (instance_name or "").strip() or "WebNUT"
     ups_list = list(telemetry.get("ups_list") or [])
     connected = bool(telemetry.get("connected"))
 
@@ -537,6 +563,7 @@ def build_homeassistant_state(
 
     return HomeAssistantStateResponse(
         instance_id=instance_id,
+        instance_name=clean_instance_name,
         version=version,
         latest_version=latest_version,
         update_available=update_available,
@@ -593,7 +620,16 @@ def build_prometheus_metrics(state: HomeAssistantStateResponse) -> str:
         lines,
         "webnut_info",
         "Static metadata about the WebNUT instance",
-        [([("version", state.version), ("instance_id", state.instance_id)], 1)],
+        [
+            (
+                [
+                    ("version", state.version),
+                    ("instance_id", state.instance_id),
+                    ("instance_name", state.instance_name),
+                ],
+                1,
+            )
+        ],
     )
     _prom_gauge(
         lines,
@@ -837,8 +873,9 @@ def render_prometheus_scrape_yaml(
     return "\n".join(lines) + "\n", metrics_url, notes
 
 
-def build_grafana_dashboard_json() -> dict:
+def build_grafana_dashboard_json(instance_name: str = "WebNUT") -> dict:
     """Return a ready-to-import Grafana dashboard JSON for WebNUT Prometheus metrics."""
+    clean_name = (instance_name or "").strip() or "WebNUT"
     ds_ref = {"type": "prometheus", "uid": "${datasource}"}
 
     def _stat_panel(
@@ -924,7 +961,7 @@ def build_grafana_dashboard_json() -> dict:
         ],
         "id": None,
         "uid": "webnut-power-overview",
-        "title": "WebNUT — UPS & Power Orchestrator",
+        "title": f"{clean_name} — UPS & Power Orchestrator",
         "tags": ["webnut", "ups", "nut", "power"],
         "timezone": "browser",
         "schemaVersion": 39,

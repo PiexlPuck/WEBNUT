@@ -114,6 +114,7 @@ async def test_prometheus_metrics_and_root_alias(db, tmp_path: Path) -> None:
             assert "text/plain" in res.headers["content-type"]
             body = res.text
             assert "webnut_info{" in body
+            assert 'instance_name="WebNUT"' in body
             assert 'webnut_ups_battery_charge_percent{ups="apc_main"} 98.0' in body
             assert 'webnut_ups_realpower_watts{ups="apc_main"} 220.0' in body
             assert 'webnut_orchestrator_state{state="stabilizing"} 1' in body
@@ -193,15 +194,22 @@ async def test_prometheus_auth_disable_scrape_yaml_and_grafana_dashboard(db, tmp
         )
         assert bad.status_code == 422
 
-        # Grafana Dashboard JSON download
+        # Grafana Dashboard JSON download uses custom instance_name in title
+        await db.execute("UPDATE onboarding_state SET instance_name = 'Garage UPS' WHERE id = 1")
         dash_res = await client.get("/api/integrations/grafana/dashboard.json")
         assert dash_res.status_code == 200
         assert "application/json" in dash_res.headers["content-type"]
         dash = dash_res.json()
         assert dash["uid"] == "webnut-power-overview"
+        assert dash["title"].startswith("Garage UPS ")
         assert len(dash["panels"]) >= 10
         assert any(v["name"] == "ups" for v in dash["templating"]["list"])
         assert any(i["name"] == "DS_PROMETHEUS" for i in dash["__inputs"])
+
+        metrics_custom = (
+            await client.get("/metrics", headers={"Authorization": f"Bearer {api_key}"})
+        ).text
+        assert 'instance_name="Garage UPS"' in metrics_custom
 
         # Disabling prometheus_enabled returns 403
         upd = await client.put(

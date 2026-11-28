@@ -24,6 +24,7 @@ import {
   Zap,
 } from "lucide-react";
 import { Modal } from "./Modal";
+import { copyToClipboard } from "../utils/clipboard";
 import type {
   AppVersionStatus,
   NutServiceStatus,
@@ -129,9 +130,11 @@ export function Layout({
   const updateCmd =
     "curl -fsSL https://raw.githubusercontent.com/PiexlPuck/WEBNUT/main/scripts/install.sh | bash -s -- --update";
   const copyUpdateCmd = async () => {
-    await navigator.clipboard.writeText(updateCmd);
-    setCopiedCmd(true);
-    window.setTimeout(() => setCopiedCmd(false), 2000);
+    const ok = await copyToClipboard(updateCmd);
+    if (ok) {
+      setCopiedCmd(true);
+      window.setTimeout(() => setCopiedCmd(false), 2000);
+    }
   };
   const primaryUps = telemetry.ups_list[0];
   const upsStatus = primaryUps?.status ?? (telemetry.connected ? "NO UPS" : "DISCONNECTED");
@@ -192,7 +195,7 @@ export function Layout({
               className="lg:hidden inline-flex items-center gap-1 px-2 py-0.5 rounded bg-surface-800 hover:bg-surface-700 border border-slate-700/80 text-[11px] text-slate-300 disabled:opacity-50"
             >
               <RefreshCw className={`h-3 w-3 ${checkingUpdates ? "animate-spin" : ""}`} />
-              <span>v{versionStatus?.current_version ?? "2.5.0"}</span>
+              <span>v{versionStatus?.current_version ?? "2.5.1"}</span>
             </button>
             <span
               title={wsConnected ? "Live WebSocket Connected" : "Reconnecting..."}
@@ -288,7 +291,7 @@ export function Layout({
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5">
                 <span className="text-slate-400 font-mono">
-                  v{versionStatus?.current_version ?? "2.5.0"}
+                  v{versionStatus?.current_version ?? "2.5.1"}
                 </span>
                 {versionStatus?.update_available && (
                   <span
@@ -362,7 +365,7 @@ export function Layout({
                 </div>
                 <div className="flex flex-wrap items-center gap-2 text-slate-300">
                   <span>Run on host:</span>
-                  <code className="px-2 py-0.5 rounded bg-surface-950 border border-slate-700 font-mono text-[11px] text-indigo-300">
+                  <code className="select-all px-2 py-0.5 rounded bg-surface-950 border border-slate-700 font-mono text-[11px] text-indigo-300">
                     {updateCmd}
                   </code>
                   <button

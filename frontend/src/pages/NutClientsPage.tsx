@@ -17,6 +17,7 @@ import {
   UserCheck,
 } from "lucide-react";
 import { api, ApiError } from "../api/client";
+import { copyToClipboard } from "../utils/clipboard";
 import type {
   HostRecord,
   NutClientConfigRequest,
@@ -279,9 +280,11 @@ export function NutClientsPage({
     setLoadingAccount(username);
     try {
       const password = await fetchAccountPassword(username);
-      await navigator.clipboard.writeText(password);
-      setCopiedKey(`acct-${username}`);
-      window.setTimeout(() => setCopiedKey(null), 2000);
+      const ok = await copyToClipboard(password);
+      if (ok) {
+        setCopiedKey(`acct-${username}`);
+        window.setTimeout(() => setCopiedKey(null), 2000);
+      }
     } catch (err) {
       setUserFeedback({
         ok: false,
@@ -382,9 +385,11 @@ export function NutClientsPage({
   };
 
   const copyText = async (key: string, text: string) => {
-    await navigator.clipboard.writeText(text);
-    setCopiedKey(key);
-    window.setTimeout(() => setCopiedKey(null), 2000);
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      setCopiedKey(key);
+      window.setTimeout(() => setCopiedKey(null), 2000);
+    }
   };
 
   const liveClientPairs = useMemo(() => {

@@ -4,7 +4,9 @@ import {
   ArrowUpCircle,
   Bell,
   Check,
+  Compass,
   Copy,
+  Edit2,
   FileText,
   FlaskConical,
   FolderArchive,
@@ -21,6 +23,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
+import { Modal } from "./Modal";
 import type {
   AppVersionStatus,
   NutServiceStatus,
@@ -45,6 +48,9 @@ export type NavTab =
 
 interface LayoutProps {
   role?: "main" | "repeater";
+  instanceName?: string;
+  onRenameInstance?: (name: string) => Promise<void>;
+  onOpenWizard?: () => void;
   activeTab: NavTab;
   onSelectTab: (tab: NavTab) => void;
   wsConnected: boolean;
@@ -80,6 +86,9 @@ const REPEATER_NAV_ITEMS: { id: NavTab; label: string; icon: typeof Activity }[]
 
 export function Layout({
   role = "main",
+  instanceName = "WebNUT",
+  onRenameInstance,
+  onOpenWizard,
   activeTab,
   onSelectTab,
   wsConnected,
@@ -95,6 +104,27 @@ export function Layout({
   const navItems = role === "repeater" ? REPEATER_NAV_ITEMS : MAIN_NAV_ITEMS;
   const [bannerDismissed, setBannerDismissed] = useState(false);
   const [copiedCmd, setCopiedCmd] = useState(false);
+  const [renameModalOpen, setRenameModalOpen] = useState(false);
+  const [renameDraft, setRenameDraft] = useState(instanceName);
+  const [renaming, setRenaming] = useState(false);
+
+  const handleOpenRename = () => {
+    setRenameDraft(instanceName || "WebNUT");
+    setRenameModalOpen(true);
+  };
+
+  const handleSaveRename = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleaned = renameDraft.trim();
+    if (!cleaned || !onRenameInstance) return;
+    setRenaming(true);
+    try {
+      await onRenameInstance(cleaned);
+      setRenameModalOpen(false);
+    } finally {
+      setRenaming(false);
+    }
+  };
 
   const updateCmd =
     "curl -fsSL https://raw.githubusercontent.com/PiexlPuck/WEBNUT/main/scripts/install.sh | bash -s -- --update";
@@ -125,9 +155,21 @@ export function Layout({
             <div className="h-9 w-9 rounded-lg bg-indigo-500/20 border border-indigo-400/30 flex items-center justify-center text-indigo-400">
               <Zap className="h-5 w-5" />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold tracking-tight text-white">WebNUT</h1>
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <h1 className="text-base font-bold tracking-tight text-white truncate">
+                  {instanceName || "WebNUT"}
+                </h1>
+                {onRenameInstance && (
+                  <button
+                    type="button"
+                    onClick={handleOpenRename}
+                    title="Rename this WebNUT instance"
+                    className="p-0.5 rounded text-slate-500 hover:text-slate-200 hover:bg-surface-800 shrink-0"
+                  >
+                    <Edit2 className="h-3 w-3" />
+                  </button>
+                )}
                 {role === "repeater" && (
                   <span className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30">
                     Repeater
@@ -150,7 +192,7 @@ export function Layout({
               className="lg:hidden inline-flex items-center gap-1 px-2 py-0.5 rounded bg-surface-800 hover:bg-surface-700 border border-slate-700/80 text-[11px] text-slate-300 disabled:opacity-50"
             >
               <RefreshCw className={`h-3 w-3 ${checkingUpdates ? "animate-spin" : ""}`} />
-              <span>v{versionStatus?.current_version ?? "2.4.0"}</span>
+              <span>v{versionStatus?.current_version ?? "2.5.0"}</span>
             </button>
             <span
               title={wsConnected ? "Live WebSocket Connected" : "Reconnecting..."}
@@ -246,7 +288,7 @@ export function Layout({
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5">
                 <span className="text-slate-400 font-mono">
-                  v{versionStatus?.current_version ?? "2.4.0"}
+                  v{versionStatus?.current_version ?? "2.5.0"}
                 </span>
                 {versionStatus?.update_available && (
                   <span
@@ -290,6 +332,17 @@ export function Layout({
                 Up to date • {new Date(versionStatus.last_checked_at).toLocaleTimeString()}
               </div>
             ) : null}
+
+            {onOpenWizard && (
+              <button
+                type="button"
+                onClick={onOpenWizard}
+                className="w-full mt-1 inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 border border-slate-700/80 text-[11px] font-medium text-slate-300"
+              >
+                <Compass className="h-3.5 w-3.5 text-indigo-400" />
+                Setup Wizard
+              </button>
+            )}
           </div>
         </div>
       </aside>
@@ -349,6 +402,49 @@ export function Layout({
         )}
         {children}
       </main>
+
+      <Modal
+        open={renameModalOpen}
+        title="Rename WebNUT Instance"
+        onClose={() => !renaming && setRenameModalOpen(false)}
+        maxWidth="max-w-sm"
+      >
+        <form onSubmit={(e) => void handleSaveRename(e)} className="space-y-4">
+          <div>
+            <label className="block text-xs font-medium text-slate-300 mb-1.5">
+              Instance Name
+            </label>
+            <input
+              required
+              maxLength={64}
+              value={renameDraft}
+              onChange={(e) => setRenameDraft(e.target.value)}
+              placeholder="e.g., Home Rack WebNUT"
+              className="w-full rounded-lg bg-surface-950 border border-slate-700 px-3 py-2 text-sm text-white"
+            />
+            <p className="text-[11px] text-slate-400 mt-1.5">
+              Shown in the sidebar, browser tab title, Home Assistant, and Pushover notifications.
+            </p>
+          </div>
+          <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+            <button
+              type="button"
+              onClick={() => setRenameModalOpen(false)}
+              disabled={renaming}
+              className="px-3.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-xs font-medium text-slate-300"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={renaming || !renameDraft.trim()}
+              className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white disabled:opacity-50"
+            >
+              {renaming ? "Saving..." : "Save Name"}
+            </button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }

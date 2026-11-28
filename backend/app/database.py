@@ -664,6 +664,35 @@ class Database:
             )
             await self.conn.commit()
 
+        if 14 not in applied:
+            now = utc_now_iso()
+            await self.conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS onboarding_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    instance_name TEXT NOT NULL DEFAULT 'WebNUT',
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    skipped INTEGER NOT NULL DEFAULT 0,
+                    last_step INTEGER NOT NULL DEFAULT 0,
+                    completed_at TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                """
+            )
+            await self.conn.execute(
+                """
+                INSERT OR IGNORE INTO onboarding_state (
+                    id, instance_name, completed, skipped, last_step, completed_at, updated_at
+                ) VALUES (1, 'WebNUT', 0, 0, 0, NULL, ?)
+                """,
+                (now,),
+            )
+            await self.conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (14, ?)",
+                (now,),
+            )
+            await self.conn.commit()
+
     async def fetch_one(self, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
         cur = await self.conn.execute(sql, params)
         row = await cur.fetchone()

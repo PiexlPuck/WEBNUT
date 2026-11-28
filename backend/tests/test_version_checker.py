@@ -141,6 +141,66 @@ async def test_version_checker_falls_back_on_github_api_403_rate_limit(db, event
 
 
 @pytest.mark.asyncio
+async def test_version_checker_notifies_again_for_each_new_release(db, event_log) -> None:
+    pushover_calls: list[str] = []
+    remote_ver = {"tag": "v1.2.0", "ver": "1.2.0"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "api.github.com/repos/PiexlPuck/WEBNUT/releases/latest" in url:
+            return httpx.Response(
+                200,
+                json={
+                    "tag_name": remote_ver["tag"],
+                    "html_url": f"https://github.com/PiexlPuck/WEBNUT/releases/tag/{remote_ver['tag']}",
+                },
+            )
+        if "raw.githubusercontent.com/PiexlPuck/WEBNUT/main/VERSION" in url:
+            return httpx.Response(200, text=f"{remote_ver['ver']}\n")
+        if "api.pushover.net/1/messages.json" in url:
+            pushover_calls.append(request.content.decode("utf-8"))
+            return httpx.Response(200, json={"status": 1, "request": "ok"})
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        dispatcher = NotificationDispatcher(db, event_log, http_client=client)
+        # First check while Pushover is disabled: detects v1.2.0, does not mark notified
+        checker = VersionChecker(
+            db, dispatcher, event_log, http_client=client, current_version="1.0.0"
+        )
+        st0 = await checker.check_now()
+        assert st0.update_available is True
+        assert st0.notified_version is None
+        assert len(pushover_calls) == 0
+
+        # Enable Pushover -> next check notifies once for v1.2.0
+        await dispatcher.update_pushover_config(
+            PushoverConfigRequest(enabled=True, user_key="user123", api_token="tok456")
+        )
+        st1 = await checker.check_now()
+        assert st1.notified_version == "1.2.0"
+        assert len(pushover_calls) == 1
+
+        # Repeat check on v1.2.0 does NOT send duplicate
+        await checker.check_now()
+        assert len(pushover_calls) == 1
+
+        # New release v1.3.0 arrives -> notifies once again even though notified_at was already set!
+        remote_ver["tag"] = "v1.3.0"
+        remote_ver["ver"] = "1.3.0"
+        st2 = await checker.check_now()
+        assert st2.latest_version == "1.3.0"
+        assert st2.notified_version == "1.3.0"
+        assert len(pushover_calls) == 2
+        assert "1.3.0" in pushover_calls[1]
+
+        # Repeat check on v1.3.0 does NOT duplicate
+        await checker.check_now()
+        assert len(pushover_calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_version_checker_prefers_newer_raw_version_over_older_release(db, event_log) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
@@ -170,4 +230,64 @@ async def test_version_checker_prefers_newer_raw_version_over_older_release(db, 
         assert st.last_error is None
         assert st.latest_version == "2.1.0"
         assert st.update_available is True
+
+
+@pytest.mark.asyncio
+async def test_version_checker_notifies_again_for_each_new_release(db, event_log) -> None:
+    pushover_calls: list[str] = []
+    remote_ver = {"tag": "v1.2.0", "ver": "1.2.0"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "api.github.com/repos/PiexlPuck/WEBNUT/releases/latest" in url:
+            return httpx.Response(
+                200,
+                json={
+                    "tag_name": remote_ver["tag"],
+                    "html_url": f"https://github.com/PiexlPuck/WEBNUT/releases/tag/{remote_ver['tag']}",
+                },
+            )
+        if "raw.githubusercontent.com/PiexlPuck/WEBNUT/main/VERSION" in url:
+            return httpx.Response(200, text=f"{remote_ver['ver']}\n")
+        if "api.pushover.net/1/messages.json" in url:
+            pushover_calls.append(request.content.decode("utf-8"))
+            return httpx.Response(200, json={"status": 1, "request": "ok"})
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        dispatcher = NotificationDispatcher(db, event_log, http_client=client)
+        # First check while Pushover is disabled: detects v1.2.0, does not mark notified
+        checker = VersionChecker(
+            db, dispatcher, event_log, http_client=client, current_version="1.0.0"
+        )
+        st0 = await checker.check_now()
+        assert st0.update_available is True
+        assert st0.notified_version is None
+        assert len(pushover_calls) == 0
+
+        # Enable Pushover -> next check notifies once for v1.2.0
+        await dispatcher.update_pushover_config(
+            PushoverConfigRequest(enabled=True, user_key="user123", api_token="tok456")
+        )
+        st1 = await checker.check_now()
+        assert st1.notified_version == "1.2.0"
+        assert len(pushover_calls) == 1
+
+        # Repeat check on v1.2.0 does NOT send duplicate
+        await checker.check_now()
+        assert len(pushover_calls) == 1
+
+        # New release v1.3.0 arrives -> notifies once again even though notified_at was already set!
+        remote_ver["tag"] = "v1.3.0"
+        remote_ver["ver"] = "1.3.0"
+        st2 = await checker.check_now()
+        assert st2.latest_version == "1.3.0"
+        assert st2.notified_version == "1.3.0"
+        assert len(pushover_calls) == 2
+        assert "1.3.0" in pushover_calls[1]
+
+        # Repeat check on v1.3.0 does NOT duplicate
+        await checker.check_now()
+        assert len(pushover_calls) == 2
 

@@ -32,6 +32,8 @@ import type {
   NutConnectionConfigView,
   NutConnectionTestResponse,
   NutServiceStatus,
+  OnboardingState,
+  OnboardingStateUpdatePayload,
   OrchestratorConfig,
   OrchestratorState,
   PrometheusConfigRequest,
@@ -279,8 +281,23 @@ export const api = {
   },
   clearEvents: () => request<{ cleared: number }>("/api/events", { method: "DELETE" }),
 
-  // System / Version
+  // System / Version / Identity / Onboarding
   getSystemInfo: () => request<SystemInfo>("/api/system/info"),
+  updateSystemIdentity: (instanceName: string) =>
+    request<SystemInfo>("/api/system/identity", {
+      method: "PUT",
+      body: JSON.stringify({ instance_name: instanceName }),
+    }),
+  getOnboardingState: () => request<OnboardingState>("/api/system/onboarding"),
+  updateOnboardingState: (payload: OnboardingStateUpdatePayload) =>
+    request<OnboardingState>("/api/system/onboarding", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+  resetOnboardingState: () =>
+    request<OnboardingState>("/api/system/onboarding/reset", {
+      method: "POST",
+    }),
   getVersionStatus: () => request<AppVersionStatus>("/api/system/version"),
   checkForUpdates: () =>
     request<AppVersionStatus>("/api/system/version/check", { method: "POST" }),

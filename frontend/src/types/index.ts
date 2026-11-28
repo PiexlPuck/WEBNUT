@@ -809,6 +809,29 @@ export interface SystemInfo {
   nut_port: number;
   node_name: string;
   paired: boolean;
+  instance_name: string;
+}
+
+export interface OnboardingState {
+  instance_name: string;
+  completed: boolean;
+  skipped: boolean;
+  last_step: number;
+  completed_at: string | null;
+  role: "main" | "repeater";
+  has_ups_configured: boolean;
+  has_ups_polling: boolean;
+  has_hosts: boolean;
+  has_pushover: boolean;
+  has_repeaters: boolean;
+  repeater_paired: boolean;
+}
+
+export interface OnboardingStateUpdatePayload {
+  instance_name?: string;
+  completed?: boolean;
+  skipped?: boolean;
+  last_step?: number;
 }
 
 export interface RepeaterNodeView {

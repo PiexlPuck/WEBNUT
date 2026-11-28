@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
+import { api } from "./api/client";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Layout, type NavTab } from "./components/Layout";
+import { StartupWizard } from "./components/StartupWizard";
 import { useLiveTelemetry } from "./hooks/useLiveTelemetry";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DrillsPage } from "./pages/DrillsPage";
@@ -14,7 +16,7 @@ import { RecordedConfigsPage } from "./pages/RecordedConfigsPage";
 import { RepeaterLinkPage } from "./pages/RepeaterLinkPage";
 import { RepeatersPage } from "./pages/RepeatersPage";
 import { UpsControlPage } from "./pages/UpsControlPage";
-import type { RecordedClientConfigSummary } from "./types";
+import type { OnboardingStateUpdatePayload, RecordedClientConfigSummary } from "./types";
 
 const REPEATER_ALLOWED_TABS: NavTab[] = ["repeater_link", "nut", "events"];
 
@@ -23,15 +25,30 @@ export function App() {
   const [clientSetupHostId, setClientSetupHostId] = useState<number | null>(null);
   const [selectedRecordedConfig, setSelectedRecordedConfig] =
     useState<RecordedClientConfigSummary | null>(null);
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [wizardMinimized, setWizardMinimized] = useState(false);
+  const [wizardAutoChecked, setWizardAutoChecked] = useState(false);
   const live = useLiveTelemetry();
 
   const role = live.systemInfo?.role ?? "main";
+  const instanceName =
+    live.systemInfo?.instance_name || live.onboarding?.instance_name || "WebNUT";
 
   useEffect(() => {
     if (role === "repeater" && !REPEATER_ALLOWED_TABS.includes(activeTab)) {
       setActiveTab("repeater_link");
     }
   }, [role, activeTab]);
+
+  useEffect(() => {
+    if (!wizardAutoChecked && live.onboarding) {
+      setWizardAutoChecked(true);
+      if (!live.onboarding.completed && !live.onboarding.skipped) {
+        setWizardMinimized(false);
+        setWizardOpen(true);
+      }
+    }
+  }, [wizardAutoChecked, live.onboarding]);
 
   const effectiveTab: NavTab =
     role === "repeater" && !REPEATER_ALLOWED_TABS.includes(activeTab)
@@ -48,9 +65,33 @@ export function App() {
     setActiveTab("clients");
   };
 
+  const handleRenameInstance = async (name: string) => {
+    await api.updateSystemIdentity(name);
+    await live.refreshAll();
+  };
+
+  const handleUpdateOnboarding = async (payload: OnboardingStateUpdatePayload) => {
+    await api.updateOnboardingState(payload);
+    if (payload.completed || payload.skipped) {
+      setWizardOpen(false);
+      setWizardMinimized(false);
+    }
+    await live.refreshAll();
+  };
+
+  const handleOpenWizard = async () => {
+    await api.resetOnboardingState();
+    await live.refreshAll();
+    setWizardMinimized(false);
+    setWizardOpen(true);
+  };
+
   return (
     <Layout
       role={role}
+      instanceName={instanceName}
+      onRenameInstance={handleRenameInstance}
+      onOpenWizard={() => void handleOpenWizard()}
       activeTab={effectiveTab}
       onSelectTab={setActiveTab}
       wsConnected={live.wsConnected}
@@ -146,6 +187,21 @@ export function App() {
         {effectiveTab === "notifications" && <NotificationsPage />}
         {effectiveTab === "events" && <EventsPage />}
       </ErrorBoundary>
+
+      <StartupWizard
+        open={wizardOpen}
+        minimized={wizardMinimized}
+        role={role}
+        onboarding={live.onboarding}
+        telemetry={live.telemetry}
+        hostsCount={live.hosts.length}
+        repeatersCount={live.repeaterNodes.length}
+        onMinimize={setWizardMinimized}
+        onNavigateTab={setActiveTab}
+        onRenameInstance={handleRenameInstance}
+        onUpdateOnboarding={handleUpdateOnboarding}
+        onRefresh={live.refreshAll}
+      />
     </Layout>
   );
 }

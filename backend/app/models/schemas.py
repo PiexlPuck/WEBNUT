@@ -967,6 +967,7 @@ class SystemInfoResponse(BaseModel):
     nut_port: int
     node_name: str = ""
     paired: bool = False
+    instance_name: str = "WebNUT"
 
 
 class RepeaterJoinTokenCreateRequest(BaseModel):
@@ -1185,3 +1186,31 @@ class FlowDrillReportsSummary(BaseModel):
 class FlowDrillReportsResponse(BaseModel):
     summary: FlowDrillReportsSummary
     reports: list[FlowDrillReportRecord] = Field(default_factory=list)
+
+
+# --- Instance Identity & Startup Onboarding Wizard ---
+
+class SystemIdentityUpdateRequest(BaseModel):
+    instance_name: str = Field(min_length=1, max_length=64)
+
+
+class OnboardingStateResponse(BaseModel):
+    instance_name: str = "WebNUT"
+    completed: bool = False
+    skipped: bool = False
+    last_step: int = 0
+    completed_at: str | None = None
+    role: Literal["main", "repeater"] = "main"
+    has_ups_configured: bool = False
+    has_ups_polling: bool = False
+    has_hosts: bool = False
+    has_pushover: bool = False
+    has_repeaters: bool = False
+    repeater_paired: bool = False
+
+
+class OnboardingStateUpdateRequest(BaseModel):
+    instance_name: str | None = Field(default=None, min_length=1, max_length=64)
+    completed: bool | None = None
+    skipped: bool | None = None
+    last_step: int | None = Field(default=None, ge=0, le=20)

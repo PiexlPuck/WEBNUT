@@ -428,8 +428,18 @@ async def get_homeassistant_info(
     """Used by the Home Assistant config flow to validate connectivity, API key, and unique ID."""
     row = await _require_homeassistant(request, x_api_key, authorization)
     version, _, _ = await _version_info(request)
+    instance_name = "WebNUT"
+    try:
+        ob_row = await request.app.state.db.fetch_one(
+            "SELECT instance_name FROM onboarding_state WHERE id = 1"
+        )
+        if ob_row and str(ob_row.get("instance_name") or "").strip():
+            instance_name = str(ob_row["instance_name"]).strip()
+    except Exception:
+        pass
     return HomeAssistantInfoResponse(
         instance_id=str(row.get("instance_id") or ""),
+        name=instance_name,
         version=version,
         server_url=f"http://{detect_local_lan_ip()}:{settings.web_port}",
         api_key_required=bool(row.get("api_key_enabled")) and bool(row.get("api_key_enc")),

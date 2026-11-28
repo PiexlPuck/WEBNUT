@@ -6,6 +6,7 @@ import type {
   FlowDrillReportRecord,
   HostRecord,
   NutServiceStatus,
+  OnboardingState,
   OrchestratorState,
   RepeaterLinkStatus,
   RepeaterNodeView,
@@ -56,6 +57,7 @@ function normalizeHost(raw: Record<string, unknown>): HostRecord {
 export interface LiveState {
   wsConnected: boolean;
   systemInfo: SystemInfo | null;
+  onboarding: OnboardingState | null;
   telemetry: TelemetrySnapshot;
   hosts: HostRecord[];
   orchestrator: OrchestratorState;
@@ -94,6 +96,7 @@ const DEFAULT_ORCHESTRATOR: OrchestratorState = {
 export function useLiveTelemetry(): LiveState {
   const [wsConnected, setWsConnected] = useState(false);
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
+  const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
   const [telemetry, setTelemetry] = useState<TelemetrySnapshot>(DEFAULT_TELEMETRY);
   const [hosts, setHosts] = useState<HostRecord[]>([]);
   const [orchestrator, setOrchestrator] = useState<OrchestratorState>(DEFAULT_ORCHESTRATOR);
@@ -114,7 +117,7 @@ export function useLiveTelemetry(): LiveState {
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to reach WebNUT backend";
       setVersionStatus((prev) => ({
-        current_version: prev?.current_version ?? "2.4.0",
+        current_version: prev?.current_version ?? "2.5.0",
         latest_version: prev?.latest_version ?? null,
         update_available: prev?.update_available ?? false,
         release_url: prev?.release_url ?? null,
@@ -132,8 +135,12 @@ export function useLiveTelemetry(): LiveState {
 
   const refreshAll = useCallback(async () => {
     try {
-      const info = await api.getSystemInfo();
+      const [info, ob] = await Promise.all([
+        api.getSystemInfo(),
+        api.getOnboardingState().catch(() => null),
+      ]);
       setSystemInfo(info);
+      if (ob) setOnboarding(ob);
       if (info.role === "repeater") {
         const [tel, svc, ev, ver, link] = await Promise.all([
           api.getTelemetry(),
@@ -169,6 +176,13 @@ export function useLiveTelemetry(): LiveState {
       // Ignore transient hydration failures
     }
   }, []);
+
+  useEffect(() => {
+    const label = systemInfo?.instance_name?.trim() || onboarding?.instance_name?.trim() || "WebNUT";
+    const subtitle =
+      systemInfo?.role === "repeater" ? "Remote UPS Repeater" : "UPS & Power Orchestrator";
+    document.title = `${label} — ${subtitle}`;
+  }, [systemInfo?.instance_name, systemInfo?.role, onboarding?.instance_name]);
 
   useEffect(() => {
     void refreshAll();
@@ -210,6 +224,8 @@ export function useLiveTelemetry(): LiveState {
             setRecentEvents((prev) => [item, ...prev.filter((e) => e.id !== item.id)].slice(0, 25));
           } else if (msg.type === "update_status") {
             setVersionStatus(msg.data as AppVersionStatus);
+          } else if (msg.type === "system_info") {
+            setSystemInfo(msg.data as SystemInfo);
           }
         } catch {
           // Ignore malformed frame
@@ -241,6 +257,7 @@ export function useLiveTelemetry(): LiveState {
   return {
     wsConnected,
     systemInfo,
+    onboarding,
     telemetry,
     hosts,
     orchestrator,

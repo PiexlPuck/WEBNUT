@@ -171,9 +171,25 @@ class NotificationDispatcher:
         if not providers:
             return []
 
+        effective_title = title
+        try:
+            ob_row = await self.db.fetch_one(
+                "SELECT instance_name FROM onboarding_state WHERE id = 1"
+            )
+            if ob_row:
+                inst_name = str(ob_row.get("instance_name") or "").strip()
+                if (
+                    inst_name
+                    and inst_name.lower() != "webnut"
+                    and inst_name.lower() not in title.lower()
+                ):
+                    effective_title = f"[{inst_name}] {title}"
+        except Exception:
+            pass
+
         msg = NotificationMessage(
             event_type=event_type,
-            title=title,
+            title=effective_title,
             body=body,
             priority=priority,
             metadata=metadata or {},

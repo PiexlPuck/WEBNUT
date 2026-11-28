@@ -231,12 +231,36 @@ class VersionChecker:
             ),
         )
 
-        # Send-once guarantee: only ever dispatch if update is available AND notified_at is unset
-        if update_avail and latest and notified_at is None:
+        # Send-once per release version guarantee: notify whenever latest > last notified_version
+        prev_latest = existing["latest_version"] if existing else None
+        if update_avail and latest and latest != prev_latest:
+            await self.event_log.record(
+                "system",
+                "info",
+                "app_update_detected",
+                f"Detected newer WEBNUT version v{latest} (current v{self.current_version})",
+                {"current_version": self.current_version, "latest_version": latest},
+            )
+
+        latest_t = parse_semver(latest) if latest else None
+        notified_t = parse_semver(str(notified_version)) if notified_version else None
+        already_notified_for_version = bool(
+            latest_t is not None and notified_t is not None and notified_t >= latest_t
+        )
+        if update_avail and latest and not already_notified_for_version:
+            inst_label = "WEBNUT"
+            try:
+                ob_row = await self.db.fetch_one(
+                    "SELECT instance_name FROM onboarding_state WHERE id = 1"
+                )
+                if ob_row and str(ob_row.get("instance_name") or "").strip():
+                    inst_label = str(ob_row["instance_name"]).strip()
+            except Exception:
+                pass
             results = await self.dispatcher.dispatch_event(
                 "app_update_available",
-                f"WEBNUT Update Available: v{latest}",
-                f"WEBNUT v{latest} is available (currently running v{self.current_version}). "
+                f"{inst_label} Update Available: v{latest}",
+                f"{inst_label} v{latest} is available (currently running v{self.current_version}). "
                 f"Update via 'git pull && docker compose up -d --build'. {release_url or ''}".strip(),
                 metadata={"current_version": self.current_version, "latest_version": latest},
             )
